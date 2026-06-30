@@ -1,19 +1,11 @@
 {
-  "name": "vibe-browser-linux-arm64",
-  "version": "0.1.0",
+  "name": "@startvibecoding/vibe-browser-linux-arm64",
+  "version": "0.1.0-pre",
   "description": "vibe-browser native binary for linux-arm64",
-  "os": [
-    "linux"
-  ],
-  "cpu": [
-    "arm64"
-  ],
-  "libc": [
-    "glibc"
-  ],
-  "files": [
-    "bin/"
-  ],
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["glibc"],
+  "files": ["bin/"],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

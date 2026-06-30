@@ -1,36 +1,36 @@
 #!/usr/bin/env node
 
 // Wrapper script that resolves and executes the platform-specific binary.
-// When installed via `npm i -g vibe-browser`, this script finds the
+// When installed via `npm i -g @startvibecoding/vibe-browser`, this script finds the
 // correct binary from the platform-specific optional dependency package.
 
 const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+const SCOPE = '@startvibecoding';
+const PKG_BASE = 'vibe-browser';
+
 // Map npm os/cpu to package name
 const PLATFORM_MAP = {
-  'linux-x64-glibc': 'vibe-browser-linux-x64',
-  'linux-arm64-glibc': 'vibe-browser-linux-arm64',
-  'linux-x64-musl': 'vibe-browser-linux-musl-x64',
-  'linux-arm64-musl': 'vibe-browser-linux-musl-arm64',
-  'darwin-x64': 'vibe-browser-darwin-x64',
-  'darwin-arm64': 'vibe-browser-darwin-arm64',
-  'win32-x64': 'vibe-browser-win32-x64',
-  'win32-arm64': 'vibe-browser-win32-arm64',
+  'linux-x64-glibc': `${SCOPE}/${PKG_BASE}-linux-x64`,
+  'linux-arm64-glibc': `${SCOPE}/${PKG_BASE}-linux-arm64`,
+  'linux-x64-musl': `${SCOPE}/${PKG_BASE}-linux-musl-x64`,
+  'linux-arm64-musl': `${SCOPE}/${PKG_BASE}-linux-musl-arm64`,
+  'darwin-x64': `${SCOPE}/${PKG_BASE}-darwin-x64`,
+  'darwin-arm64': `${SCOPE}/${PKG_BASE}-darwin-arm64`,
+  'win32-x64': `${SCOPE}/${PKG_BASE}-win32-x64`,
+  'win32-arm64': `${SCOPE}/${PKG_BASE}-win32-arm64`,
 };
 
 function detectPlatform() {
-  const os = process.platform;   // 'linux', 'darwin', 'win32'
-  const arch = process.arch;     // 'x64', 'arm64'
+  const os = process.platform;
+  const arch = process.arch;
 
   if (os === 'linux') {
-    // Detect libc: musl or glibc
     const isMusl = (() => {
       try {
-        // Check for Alpine's musl
         if (fs.existsSync('/etc/alpine-release')) return true;
-        // Check ldd output for musl
         const { execSync } = require('child_process');
         const output = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
         return output.includes('musl');
@@ -38,7 +38,6 @@ function detectPlatform() {
         return false;
       }
     })();
-
     return `${os}-${arch}-${isMusl ? 'musl' : 'glibc'}`;
   }
 
@@ -64,14 +63,13 @@ function findBinary() {
 
   try {
     addSearchDir(path.dirname(require.resolve(`${packageName}/package.json`)));
-  } catch {
-    // Keep explicit fallbacks below for unusual npm layouts.
-  }
+  } catch {}
 
-  // npm usually installs dependencies under this package. Some global installs
-  // or package managers may hoist them as siblings, so check both layouts.
-  addSearchDir(path.join(__dirname, '..', 'node_modules', packageName));
-  addSearchDir(path.join(__dirname, '..', '..', packageName));
+  // Scoped packages may be in node_modules/@scope/pkg-name
+  const pkgShortName = packageName.replace(`${SCOPE}/`, '');
+  addSearchDir(path.join(__dirname, '..', 'node_modules', SCOPE, pkgShortName));
+  addSearchDir(path.join(__dirname, '..', '..', pkgShortName));
+  addSearchDir(path.join(__dirname, '..', '..', SCOPE, pkgShortName));
 
   for (const pkgDir of searchDirs) {
     const binName = process.platform === 'win32' ? 'vibe-browser.exe' : 'vibe-browser';
@@ -100,26 +98,21 @@ function findBinary() {
   console.error(`Searched in: ${searchDirs.join(', ')}`);
   console.error('');
   console.error('If you installed globally, try reinstalling:');
-  console.error('  npm install -g vibe-browser');
+  console.error('  npm install -g @startvibecoding/vibe-browser');
   console.error('');
   console.error('If the problem persists, install via Go:');
-  console.error('  go install github.com/vibe-browser/vibe-browser/cmd/vibe-browser@latest');
+  console.error('  go install github.com/startvibecoding/vibe-browser/cmd/vibe-browser@latest');
   process.exit(1);
 }
 
-// Main
 const binaryPath = findBinary();
 const args = process.argv.slice(2);
 
 try {
   execFileSync(binaryPath, args, { stdio: 'inherit' });
 } catch (err) {
-  // Forward the exit code
   if (err.status !== undefined) {
     process.exit(err.status);
-  }
-  if (err.code) {
-    process.exit(1);
   }
   process.exit(1);
 }

@@ -23,7 +23,7 @@ Refs are assigned fresh on every snapshot. They become **stale the moment the pa
 
 ```bash
 # Install once
-npm i -g vibe-browser
+npm i -g @startvibecoding/vibe-browser
 
 # Take a screenshot of a page
 vibe-browser open https://example.com

@@ -5,7 +5,7 @@ Fast browser automation CLI and Go SDK for AI agents.
 ## Installation
 
 ```bash
-npm install -g vibe-browser
+npm install -g @startvibecoding/vibe-browser
 ```
 
 ## Usage

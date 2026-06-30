@@ -2,7 +2,7 @@
 
 # Build platform-specific npm packages with optionalDependencies architecture.
 # Each platform gets its own package containing only its binary.
-# The main package (vibe-browser) declares all platforms as optionalDependencies.
+# The main package (@startvibecoding/vibe-browser) declares all platforms as optionalDependencies.
 
 set -e
 
@@ -11,6 +11,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 NPM_DIR="$PROJECT_ROOT/npm"
 BUILD_DIR="$PROJECT_ROOT/bin"
 PACKAGES_DIR="$NPM_DIR/packages"
+
+SCOPE="@startvibecoding"
+PKG_BASE="vibe-browser"
 
 ensure_wrapper() {
   mkdir -p "$NPM_DIR/bin"
@@ -34,16 +37,16 @@ fi
 # Read version from main package.json
 VERSION=$(node -e "console.log(require('$NPM_DIR/package.json').version)")
 
-# Platform definitions: npm-cpu -> binary suffix, npm-os -> binary prefix
+# Platform definitions: npm-cpu -> binary suffix
 declare -A PLATFORMS=(
-  ["linux-x64"]="vibe-browser-linux-amd64"
-  ["linux-arm64"]="vibe-browser-linux-arm64"
-  ["linux-musl-x64"]="vibe-browser-linux-musl-amd64"
-  ["linux-musl-arm64"]="vibe-browser-linux-musl-arm64"
-  ["darwin-x64"]="vibe-browser-darwin-amd64"
-  ["darwin-arm64"]="vibe-browser-darwin-arm64"
-  ["win32-x64"]="vibe-browser-windows-amd64.exe"
-  ["win32-arm64"]="vibe-browser-windows-arm64.exe"
+  ["linux-x64"]="${PKG_BASE}-linux-amd64"
+  ["linux-arm64"]="${PKG_BASE}-linux-arm64"
+  ["linux-musl-x64"]="${PKG_BASE}-linux-musl-amd64"
+  ["linux-musl-arm64"]="${PKG_BASE}-linux-musl-arm64"
+  ["darwin-x64"]="${PKG_BASE}-darwin-amd64"
+  ["darwin-arm64"]="${PKG_BASE}-darwin-arm64"
+  ["win32-x64"]="${PKG_BASE}-windows-amd64.exe"
+  ["win32-arm64"]="${PKG_BASE}-windows-arm64.exe"
 )
 
 declare -A OS_MAP=(
@@ -73,8 +76,8 @@ for PLATFORM_KEY in "${!PLATFORMS[@]}"; do
   BINARY_NAME="${PLATFORMS[$PLATFORM_KEY]}"
   OS="${OS_MAP[$PLATFORM_KEY]}"
   CPU="${CPU_MAP[$PLATFORM_KEY]}"
-  PKG_NAME="vibe-browser-${PLATFORM_KEY}"
-  PKG_DIR="$PACKAGES_DIR/$PKG_NAME"
+  PKG_NAME="${SCOPE}/${PKG_BASE}-${PLATFORM_KEY}"
+  PKG_DIR="$PACKAGES_DIR/${PKG_BASE}-${PLATFORM_KEY}"
 
   # Check binary exists
   if [ ! -f "$BUILD_DIR/$BINARY_NAME" ]; then
@@ -86,18 +89,13 @@ for PLATFORM_KEY in "${!PLATFORMS[@]}"; do
   mkdir -p "$PKG_DIR/bin"
 
   # Determine binary name inside package
-  if [ "$OS" = "win32" ]; then
-    INNER_BINARY="vibe-browser.exe"
-  else
-    INNER_BINARY="vibe-browser"
-  fi
+  INNER_BINARY="vibe-browser"
 
   # Copy binary
   cp "$BUILD_DIR/$BINARY_NAME" "$PKG_DIR/bin/$INNER_BINARY"
   chmod +x "$PKG_DIR/bin/$INNER_BINARY" 2>/dev/null || true
 
   # Create package.json
-  # For musl packages, set libc="musl" so npm can distinguish from glibc
   if echo "$PLATFORM_KEY" | grep -q "musl"; then
     cat > "$PKG_DIR/package.json" <<EOF
 {

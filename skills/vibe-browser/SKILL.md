@@ -9,7 +9,7 @@ hidden: true
 
 Fast browser automation CLI for AI agents. Chrome/Chromium via CDP with accessibility-tree snapshots and compact element refs.
 
-Install: `npm i -g vibe-browser`
+Install: `npm i -g @startvibecoding/vibe-browser`
 
 ## Start here
 
