@@ -1,6 +1,6 @@
 {
   "name": "@startvibecoding/vibe-browser-win32-x64",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "vibe-browser native binary for win32-x64",
   "os": ["win32"],
   "cpu": ["x64"],

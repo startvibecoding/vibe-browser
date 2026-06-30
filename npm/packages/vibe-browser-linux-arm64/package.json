@@ -1,6 +1,6 @@
 {
   "name": "@startvibecoding/vibe-browser-linux-arm64",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "vibe-browser native binary for linux-arm64",
   "os": ["linux"],
   "cpu": ["arm64"],

@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Example: Form automation workflow
+# Example: Form automation workflow (bash / zsh)
 # This script demonstrates filling out and submitting a form
+# macOS/Linux: Run as ./form-automation.sh [url]
+# Windows: Use form-automation.ps1 instead
 
 set -e
 

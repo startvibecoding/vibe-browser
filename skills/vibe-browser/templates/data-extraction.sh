@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Example: Data extraction workflow
+# Example: Data extraction workflow (bash / zsh)
 # This script demonstrates extracting data from a web page
+# macOS/Linux: Run as ./data-extraction.sh [url]
+# Windows: Use data-extraction.ps1 instead
 
 set -e
 

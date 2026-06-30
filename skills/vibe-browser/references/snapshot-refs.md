@@ -107,9 +107,35 @@ vibe-browser click ".modal .close-button"
 
 ## Supported Browsers
 
-The snapshot feature works with all supported browsers:
-- Chrome
-- Chromium
-- Brave
-- Edge
-- Chrome Canary
+The snapshot feature works with all supported browsers on macOS, Linux, and Windows:
+
+| Browser | macOS | Linux | Windows |
+|---------|-------|-------|--------|
+| Chrome | ✅ | ✅ | ✅ |
+| Chromium | ✅ | ✅ | ✅ |
+| Brave | ✅ | ✅ | ✅ |
+| Edge | ✅ | ✅ | ✅ |
+| Chrome Canary | ✅ | — | — |
+
+### Platform-Specific Browser Paths
+
+#### macOS
+- Chrome: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Chromium: `/Applications/Chromium.app/Contents/MacOS/Chromium`
+- Brave: `/Applications/Brave Browser.app/Contents/MacOS/Brave Browser`
+- Edge: `/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`
+- Chrome Canary: `/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary`
+
+#### Linux
+- Chrome: `google-chrome`, `google-chrome-stable`, `/usr/bin/google-chrome`
+- Chromium: `chromium`, `chromium-browser`, `/usr/bin/chromium`
+- Brave: `brave-browser`, `/usr/bin/brave-browser`
+- Edge: `microsoft-edge`, `/usr/bin/microsoft-edge`
+
+#### Windows
+- Chrome: `%PROGRAMFILES%\Google\Chrome\Application\chrome.exe`
+- Chromium: `%LOCALAPPDATA%\Chromium\Application\chrome.exe`
+- Brave: `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe`
+- Edge: `%PROGRAMFILES%\Microsoft\Edge\Application\msedge.exe`
+
+Specify a custom browser path with `--executable-path` or the `CHROME_PATH` environment variable if auto-detection fails.

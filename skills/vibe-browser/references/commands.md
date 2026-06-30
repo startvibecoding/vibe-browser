@@ -1,6 +1,6 @@
 # Commands Reference
 
-Complete reference for all vibe-browser CLI commands.
+Complete reference for all vibe-browser CLI commands. Works on macOS, Linux, and Windows.
 
 ## Browser Discovery
 
@@ -110,10 +110,12 @@ vibe-browser tab close <tabId>       # Close tab
 ## Session Management
 
 ```bash
-vibe-browser daemon --session <name> # Start daemon session
+vibe-browser daemon --session <name> # Start daemon session (macOS/Linux only)
 vibe-browser mcp --session <name>    # Start MCP server
 vibe-browser close                   # Close browser
 ```
+
+> **Windows Note**: The `daemon` command uses Unix domain sockets and is not available on Windows. On Windows, use direct CDP connections (`--cdp-url`) or launch browser per command.
 
 ## Global Flags
 
@@ -128,10 +130,44 @@ vibe-browser close                   # Close browser
 ## Environment Variables
 
 ```bash
-VIBE_BROWSER_CDP_URL   # Same as --cdp-url
-VIBE_BROWSER_SESSION   # Same as --session
-VIBE_BROWSER_BROWSER   # Same as --browser
-VIBE_BROWSER_SOCKET_DIR  # Override socket directory
-VIBE_BROWSER_DEBUG     # Enable debug logging
-CHROME_PATH            # Path to Chrome executable
+VIBE_BROWSER_CDP_URL      # Same as --cdp-url
+VIBE_BROWSER_SESSION      # Same as --session
+VIBE_BROWSER_BROWSER      # Same as --browser
+VIBE_BROWSER_SOCKET_DIR   # Override socket directory (see platform defaults below)
+VIBE_BROWSER_DEBUG        # Enable debug logging
+CHROME_PATH               # Path to Chrome executable
 ```
+
+### Setting Environment Variables by Platform
+
+#### macOS / Linux (bash/zsh)
+
+```bash
+export VIBE_BROWSER_CDP_URL="ws://127.0.0.1:9222/devtools/browser"
+export VIBE_BROWSER_SESSION="my-session"
+export CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+#### Windows (PowerShell)
+
+```powershell
+$env:VIBE_BROWSER_CDP_URL = "ws://127.0.0.1:9222/devtools/browser"
+$env:VIBE_BROWSER_SESSION = "my-session"
+$env:CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+#### Windows (cmd)
+
+```cmd
+set VIBE_BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser
+set VIBE_BROWSER_SESSION=my-session
+set CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+```
+
+## Platform-Specific Defaults
+
+| Setting | macOS | Linux | Windows |
+|---------|-------|-------|---------|
+| Socket directory | `~/.vibe-browser/` or `$XDG_RUNTIME_DIR/vibe-browser/` | `~/.vibe-browser/` or `$XDG_RUNTIME_DIR/vibe-browser/` | `%TEMP%\vibe-browser\` |
+| Shell examples | bash/zsh | bash/zsh | PowerShell, cmd |
+| Path separator | `/` | `/` | `\` (in file paths) |

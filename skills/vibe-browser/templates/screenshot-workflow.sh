@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Example: Screenshot workflow
+# Example: Screenshot workflow (bash / zsh)
 # This script demonstrates taking various types of screenshots
+# macOS/Linux: Run as ./screenshot-workflow.sh [url] [output-dir]
+# Windows: Use screenshot-workflow.ps1 instead
 
 set -e
 
