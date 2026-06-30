@@ -153,11 +153,11 @@ npm-publish-all: npm-version npm-packages
 	@for d in npm/packages/*/; do \
 		if [ -f "$$d/package.json" ]; then \
 			echo "  Publishing $$(basename $$d)..."; \
-			cd "$$d" && npm publish --tag latest && cd - > /dev/null; \
+			cd "$$d" && npm publish --tag latest --access public && cd - > /dev/null; \
 		fi; \
 	done
 	@echo "Publishing main package..."
-	cd npm && npm publish --tag latest
+	cd npm && npm publish --tag latest --access public
 	@echo "Published all packages!"
 
 npm-publish-pre:
@@ -167,9 +167,9 @@ npm-publish-pre:
 	@for d in npm/packages/*/; do \
 		if [ -f "$$d/package.json" ]; then \
 			echo "  Publishing $$(basename $$d)..."; \
-			cd "$$d" && npm publish --tag next && cd - > /dev/null; \
+			cd "$$d" && npm publish --tag next --access public && cd - > /dev/null; \
 		fi; \
 	done
 	@echo "Publishing main package (pre-release)..."
-	cd npm && npm publish --tag next
+	cd npm && npm publish --tag next --access public
 	@echo "Published all packages (pre-release)!"
