@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run tests
+        run: make test
+
+      - name: Build all binaries
+        run: make build-all USE_UPX=false
+
+      - name: Sync npm package version
+        run: make npm-version VERSION=${GITHUB_REF_NAME}
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for file in bin/vibe-browser-*; do
+            name="$(basename "$file")"
+            if [[ "$name" == *.exe ]]; then
+              zip -j "dist/${name%.exe}.zip" "$file"
+            else
+              tar -C bin -czf "dist/${name}.tar.gz" "$name"
+            fi
+          done
+          sha256sum dist/* > dist/sha256sums.txt
+
+      - name: Pack npm packages
+        run: make npm-pack VERSION=${GITHUB_REF_NAME} USE_UPX=false
+
+      - name: Collect npm package tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          find npm -maxdepth 1 -name "*.tgz" -exec cp {} dist/ \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

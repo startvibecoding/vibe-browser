@@ -101,7 +101,7 @@ func Open(ctx context.Context, opts *Options) (*Client, error) {
 		if host == "" {
 			host = "127.0.0.1"
 		}
-		cdpURL, err := chrome.DiscoverCDPURL(opts.CDPPort)
+		cdpURL, err := chrome.DiscoverCDPURL(host, opts.CDPPort)
 		if err != nil {
 			return nil, fmt.Errorf("client: discover CDP: %w", err)
 		}
