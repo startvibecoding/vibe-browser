@@ -1,0 +1,47 @@
+{
+  "name": "vibe-browser",
+  "version": "0.1.0",
+  "description": "Fast browser automation CLI and Go SDK for AI agents",
+  "bin": {
+    "vibe-browser": "bin/vibe-browser"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
+  "keywords": [
+    "browser",
+    "automation",
+    "ai",
+    "agent",
+    "cdp",
+    "chrome",
+    "cli",
+    "sdk",
+    "mcp"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/startvibecoding/vibe-browser.git",
+    "directory": "npm"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "optionalDependencies": {
+    "vibe-browser-linux-x64": "0.1.0",
+    "vibe-browser-linux-arm64": "0.1.0",
+    "vibe-browser-linux-musl-x64": "0.1.0",
+    "vibe-browser-linux-musl-arm64": "0.1.0",
+    "vibe-browser-darwin-x64": "0.1.0",
+    "vibe-browser-darwin-arm64": "0.1.0",
+    "vibe-browser-win32-x64": "0.1.0",
+    "vibe-browser-win32-arm64": "0.1.0"
+  }
+}

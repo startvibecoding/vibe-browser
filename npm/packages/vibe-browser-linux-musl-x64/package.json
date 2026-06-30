@@ -1,0 +1,23 @@
+{
+  "name": "vibe-browser-linux-musl-x64",
+  "version": "0.1.0",
+  "description": "vibe-browser native binary for linux-x64 (musl static)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/startvibecoding/vibe-browser.git",
+    "directory": "npm"
+  }
+}
