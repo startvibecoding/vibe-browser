@@ -12,11 +12,14 @@ This project uses **Make** for build automation. Always use `make` commands inst
 
 ```bash
 make build              # Build the binary
-make build-compressed   # Build with UPX compression
-make build-all          # Build for all platforms (linux, darwin, windows)
+make build-all          # Build for all platforms
 make test               # Run tests
 make clean              # Clean build artifacts
 make install            # Install binary to $GOPATH/bin
+
+# npm packaging
+make npm-packages       # Build platform-specific npm packages
+make npm-publish-all    # Publish all npm packages
 ```
 
 ## Code Style
@@ -24,7 +27,7 @@ make install            # Install binary to $GOPATH/bin
 - Use standard Go formatting (`gofmt`)
 - Keep imports organized: stdlib, then external packages
 - Use `golang.org/x/` packages for extended stdlib functionality
-- Avoid unnecessary external dependencies
+- Prefer `github.com/gorilla/websocket` for WebSocket connections
 - CLI flags use kebab-case (e.g., `--cdp-url`, `--full-page`)
 - Use `flag` package for CLI parsing (not cobra/pflag)
 
@@ -41,31 +44,62 @@ vibe-browser/
 │   ├── mcp/              # MCP server for AI agents
 │   └── protocol/         # Protocol types and constants
 ├── internal/
-│   ├── chrome/           # Chrome launcher
-│   └── server/           # Internal server utilities
-└── examples/             # Example usage
+│   └── chrome/           # Browser launcher and discovery
+└── npm/                  # npm packages
 ```
 
 ### Package Responsibilities
 
 - **cmd/vibe-browser**: CLI entry point, flag parsing, command dispatch
 - **pkg/browser**: High-level browser automation (navigate, click, fill, snapshot, screenshot)
-- **pkg/cdp**: WebSocket client for Chrome DevTools Protocol
+- **pkg/cdp**: WebSocket client for Chrome DevTools Protocol (uses gorilla/websocket)
 - **pkg/client**: Go SDK for programmatic use (direct and daemon modes)
 - **pkg/daemon**: Unix socket server for long-running browser sessions
 - **pkg/mcp**: Model Context Protocol server for AI agents
 - **pkg/protocol**: Shared types (Request, Response, LaunchOptions, etc.)
-- **internal/chrome**: Chrome process launcher and discovery
+- **internal/chrome**: Browser launcher, discovery, and multi-browser support
 
 ## Dependencies
 
-Minimal external dependencies:
+- `github.com/gorilla/websocket` - WebSocket client for CDP
+- `github.com/stretchr/testify` - Test assertions (test-only)
+- Standard library for everything else
 
-- `golang.org/x/net` - WebSocket client (official Go extension)
-- `golang.org/x/text` - Indirect dependency
-- Standard library only for CLI (`flag`), JSON, HTTP, etc.
+When adding new features, prefer standard library solutions. Only add external packages if necessary.
 
-When adding new features, prefer standard library solutions. Only add `golang.org/x/` packages if necessary.
+## Browser Discovery
+
+The browser discovery mechanism (in `internal/chrome/launcher.go`) supports:
+
+1. **Auto-connect**: Find running browser via DevToolsActivePort or common ports
+2. **Multi-browser**: Chrome, Chromium, Brave, Edge, Chrome Canary
+3. **Platform-specific**: macOS, Linux, Windows paths for each browser
+
+### Discovery Order
+
+1. Check DevToolsActivePort files in user data directories
+2. Probe common CDP ports (9222, 9229)
+3. HTTP /json/version endpoint
+4. HTTP /json/list endpoint
+
+### Supported Browsers
+
+| Browser | Type Constant |
+|---------|--------------|
+| Chrome | `chrome.BrowserChrome` |
+| Chromium | `chrome.BrowserChromium` |
+| Brave | `chrome.BrowserBrave` |
+| Edge | `chrome.BrowserEdge` |
+| Chrome Canary | `chrome.BrowserChromeCanary` |
+
+## CDP Protocol
+
+The CDP client (`pkg/cdp/client.go`) uses gorilla/websocket for reliable WebSocket connections. Key points:
+
+- Connect to browser-level URL: `ws://host:port/devtools/browser/{id}`
+- Connect to page-level URL: `ws://host:port/devtools/page/{id}`
+- Page commands (Page.navigate, Page.enable) must be sent to page targets
+- Browser commands (Target.createTarget) can be sent to browser targets
 
 ## Testing
 
@@ -75,15 +109,7 @@ go test ./pkg/protocol  # Run specific package tests
 go test -v ./...        # Verbose output
 ```
 
-Test files use `_test.go` suffix. Use `github.com/stretchr/testify` for assertions (test-only dependency).
-
-## Environment Variables
-
-- `VIBE_BROWSER_CDP_URL`: Chrome DevTools Protocol WebSocket URL
-- `VIBE_BROWSER_SESSION`: Session name (default "default")
-- `VIBE_BROWSER_SOCKET_DIR`: Override socket directory
-- `VIBE_BROWSER_DEBUG`: Enable debug logging
-- `CHROME_PATH`: Path to Chrome executable
+Test files use `_test.go` suffix. Use `github.com/stretchr/testify` for assertions.
 
 ## Common Patterns
 
@@ -101,11 +127,12 @@ Test files use `_test.go` suffix. Use `github.com/stretchr/testify` for assertio
 3. Add MCP tool in `pkg/mcp/mcp.go` if exposing to AI agents
 4. Update protocol types in `pkg/protocol/types.go` if needed
 
-### Adding a New CDP Feature
+### Adding Browser Support
 
-1. Add CDP command in `pkg/cdp/client.go` (Send/SendToSession methods)
-2. Use it in `pkg/browser/browser.go`
-3. Follow existing patterns for error handling and response parsing
+1. Add browser type constant in `internal/chrome/launcher.go`
+2. Add executable candidates for each platform (macOS, Linux, Windows)
+3. Add user data directory paths for each platform
+4. Update `FindBrowser()` and `getUserDataDirs()` functions
 
 ## CLI Command Structure
 
@@ -123,52 +150,29 @@ vibe-browser is visible "selector"
 vibe-browser wait selector "selector"
 ```
 
-## SDK Usage Pattern
-
-```go
-import "github.com/startvibecoding/vibe-browser/pkg/client"
-
-// Direct connection
-c, _ := client.Open(ctx, &client.Options{
-    CDPURL: "ws://...",
-})
-defer c.Close()
-
-// Daemon connection
-c, _ := client.Connect(ctx, &client.Options{
-    Session: "my-session",
-})
-defer c.Close()
-```
-
 ## Binary Size Optimization
 
 The project prioritizes small binary size:
 
 1. Use standard library where possible
-2. Use `golang.org/x/` instead of third-party packages
+2. Use `github.com/gorilla/websocket` for reliable WebSocket (small overhead)
 3. Build with `-ldflags "-s -w"` to strip debug info
 4. Optional UPX compression for production builds
 
-## MCP Server
+## npm Packaging
 
-The MCP server exposes browser automation tools to AI agents. Tools are registered in `pkg/mcp/mcp.go` and follow the naming pattern:
+npm packages are scoped under `@startvibecoding`:
 
-```
-vibe_browser_<action>
-```
+- Main package: `@startvibecoding/vibe-browser`
+- Platform packages: `@startvibecoding/vibe-browser-linux-x64`, etc.
 
-Each tool has:
-- Name
-- Description
-- Input schema (JSON Schema format)
-- Handler function
+The wrapper script (`scripts/npm-installer-wrapper.js`) detects the platform and resolves the correct binary.
 
 ## Releasing
 
-1. Update version in `cmd/vibe-browser/main.go`
-2. Update `CHANGELOG.md` (if exists)
-3. Run `make build-all` to build for all platforms
+1. Update version in `npm/package.json`
+2. Run `make npm-packages` to build platform packages
+3. Run `make npm-publish-all` to publish to npm
 4. Create git tag with version
 5. Push tag to trigger CI release
 
@@ -188,9 +192,3 @@ logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
     Level: slog.LevelDebug,
 }))
 ```
-
-## Windows Support
-
-- Unix sockets are used on Linux/macOS
-- TCP sockets are used on Windows (with .port file)
-- Cross-compilation: `GOOS=windows GOARCH=amd64 make build`

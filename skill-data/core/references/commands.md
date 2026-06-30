@@ -2,6 +2,14 @@
 
 Complete reference for all vibe-browser CLI commands.
 
+## Browser Discovery
+
+```bash
+vibe-browser discover                # Auto-detect running browser
+vibe-browser browsers                # List installed browsers
+vibe-browser profiles                # List Chrome profiles
+```
+
 ## Navigation
 
 ```bash
@@ -33,8 +41,8 @@ vibe-browser scroll --x <px> --y <px>  # Scroll page
 
 ```bash
 vibe-browser snapshot                # Full accessibility tree
-vibe-browser snapshot -i             # Interactive elements only
-vibe-browser snapshot -i -c          # Compact mode
+vibe-browser snapshot --interactive  # Interactive elements only
+vibe-browser snapshot --interactive --compact  # Compact mode
 vibe-browser get text <selector>     # Get element text
 vibe-browser get html <selector>     # Get element HTML
 vibe-browser get value <selector>    # Get input value
@@ -63,11 +71,11 @@ vibe-browser wait url <pattern>      # Wait for URL
 ## Screenshots
 
 ```bash
-vibe-browser screenshot              # Output to stdout
-vibe-browser screenshot -o <file>    # Save to file
-vibe-browser screenshot --format png # PNG format (default)
-vibe-browser screenshot --format jpeg  # JPEG format
-vibe-browser screenshot --full-page  # Capture full scroll height
+vibe-browser screenshot                          # Output to stdout
+vibe-browser screenshot --output <file>          # Save to file
+vibe-browser screenshot --format png             # PNG format (default)
+vibe-browser screenshot --format jpeg            # JPEG format
+vibe-browser screenshot --full-page              # Capture full scroll height
 ```
 
 ## JavaScript
@@ -114,6 +122,7 @@ vibe-browser close                   # Close browser
 --session <name>       # Session name (default "default")
 --headless             # Run in headless mode (default true)
 --executable-path <path>  # Path to Chrome executable
+--browser <type>       # Browser type (chrome, chromium, brave, edge)
 ```
 
 ## Environment Variables
@@ -121,6 +130,7 @@ vibe-browser close                   # Close browser
 ```bash
 VIBE_BROWSER_CDP_URL   # Same as --cdp-url
 VIBE_BROWSER_SESSION   # Same as --session
+VIBE_BROWSER_BROWSER   # Same as --browser
 VIBE_BROWSER_SOCKET_DIR  # Override socket directory
 VIBE_BROWSER_DEBUG     # Enable debug logging
 CHROME_PATH            # Path to Chrome executable

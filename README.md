@@ -11,12 +11,18 @@ Inspired by [agent-browser](https://github.com/vercel-labs/agent-browser), vibe-
 - **MCP Server**: Expose tools to AI agents (Claude, Cursor, etc.)
 - **Daemon Mode**: Long-running browser session management
 - **CDP Protocol**: Full Chrome DevTools Protocol support
+- **Multi-Browser**: Chrome, Chromium, Brave, Edge support
+- **Auto-Discovery**: Automatically find running browsers
 - **Accessibility Snapshots**: Capture page structure for AI consumption
 - **Screenshots**: Capture page or element screenshots
-- **Cookies & Storage**: Manage browser state
-- **Network Control**: Headers, offline mode, geolocation
 
 ## Installation
+
+### npm (Recommended)
+
+```bash
+npm install -g @startvibecoding/vibe-browser
+```
 
 ### From Source
 
@@ -32,33 +38,41 @@ make build
 go install github.com/startvibecoding/vibe-browser/cmd/vibe-browser@latest
 ```
 
-## CLI Usage
-
-### Basic Commands
+## Quick Start
 
 ```bash
-# Open a browser and navigate to a URL
+# Open a page (auto-launches Chrome if not running)
 vibe-browser open https://example.com
 
-# Take a snapshot of the page
-vibe-browser snapshot
-
-# Click an element
-vibe-browser click "button.submit"
-
-# Fill an input field
-vibe-browser fill "input[name=email]" --value "user@example.com"
+# Get page title
+vibe-browser get title
 
 # Take a screenshot
-vibe-browser screenshot -o screenshot.png
+vibe-browser screenshot --output page.png
 
-# Evaluate JavaScript
-vibe-browser eval "document.title"
+# Take a snapshot of interactive elements
+vibe-browser snapshot --interactive
+```
+
+## CLI Usage
+
+### Browser Discovery
+
+```bash
+# Auto-detect running browser
+vibe-browser discover
+
+# List installed browsers
+vibe-browser browsers
+
+# List Chrome profiles
+vibe-browser profiles
 ```
 
 ### Navigation
 
 ```bash
+vibe-browser open https://example.com
 vibe-browser navigate https://example.com
 vibe-browser back
 vibe-browser forward
@@ -68,17 +82,17 @@ vibe-browser reload
 ### Interaction
 
 ```bash
-vibe-browser click "button"
+vibe-browser click "button.submit"
 vibe-browser dblclick "div.item"
 vibe-browser hover "a.link"
-vibe-browser fill "input" --value "text"
+vibe-browser fill "input[name=email]" --value "user@example.com"
 vibe-browser type "input" "Hello World" --delay 50
 vibe-browser press Enter
 vibe-browser select "select" --value "option1"
 vibe-browser check "input[type=checkbox]"
 vibe-browser uncheck "input[type=checkbox]"
 vibe-browser focus "input"
-vibe-browser scroll --y 100
+vibe-browser scroll --x 0 --y 500
 ```
 
 ### Reading
@@ -109,6 +123,14 @@ vibe-browser wait text "Welcome"
 vibe-browser wait url "/dashboard"
 ```
 
+### Screenshots
+
+```bash
+vibe-browser screenshot --output page.png
+vibe-browser screenshot --full-page --output full.png
+vibe-browser screenshot --format jpeg --output page.jpg
+```
+
 ### Browser Settings
 
 ```bash
@@ -134,6 +156,37 @@ vibe-browser open https://example.com --session my-session
 vibe-browser mcp --session my-session
 ```
 
+## Flags
+
+```
+--cdp-url string        Chrome DevTools Protocol WebSocket URL
+--session string        Session name (default "default")
+--headless              Run in headless mode (default true)
+--executable-path       Path to Chrome executable
+--browser string        Browser type (chrome, chromium, brave, edge)
+```
+
+## Environment Variables
+
+```
+VIBE_BROWSER_CDP_URL    Same as --cdp-url
+VIBE_BROWSER_SESSION    Same as --session
+VIBE_BROWSER_BROWSER    Same as --browser
+VIBE_BROWSER_DEBUG      Enable debug logging
+VIBE_BROWSER_SOCKET_DIR Override socket directory
+CHROME_PATH             Path to Chrome executable
+```
+
+## Supported Browsers
+
+| Browser | macOS | Linux | Windows |
+|---------|-------|-------|---------|
+| Chrome | ✓ | ✓ | ✓ |
+| Chromium | ✓ | ✓ | ✓ |
+| Brave | ✓ | ✓ | ✓ |
+| Edge | ✓ | ✓ | ✓ |
+| Chrome Canary | ✓ | - | ✓ |
+
 ## SDK Usage
 
 ### Direct Mode
@@ -153,7 +206,7 @@ import (
 func main() {
     ctx := context.Background()
 
-    // Connect to existing Chrome instance
+    // Connect to existing browser or launch new one
     c, err := client.Open(ctx, &client.Options{
         CDPURL: "ws://127.0.0.1:9222/devtools/browser",
     })
@@ -174,18 +227,6 @@ func main() {
     }
     fmt.Println("Title:", title)
 
-    // Take a snapshot
-    snapshot, err := c.Snapshot(ctx)
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(snapshot)
-
-    // Click an element
-    if err := c.Click(ctx, "a.more-info"); err != nil {
-        log.Fatal(err)
-    }
-
     // Take a screenshot
     screenshot, err := c.Screenshot(ctx)
     if err != nil {
@@ -205,7 +246,7 @@ import (
     "log"
 
     "github.com/startvibecoding/vibe-browser/pkg/client"
-    "github.com/startvibecoding/vibe-browser/pkg/protocol"
+    "github.com/startvibecoding/vibe-browser/internal/chrome"
 )
 
 func main() {
@@ -213,39 +254,8 @@ func main() {
 
     // Launch a new browser
     c, err := client.Open(ctx, &client.Options{
+        Browser: chrome.BrowserBrave,
         Headless: true,
-        Launch: &protocol.LaunchOptions{
-            ViewportWidth:  1920,
-            ViewportHeight: 1080,
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer c.Close()
-
-    // Use the browser...
-}
-```
-
-### Daemon Mode
-
-```go
-package main
-
-import (
-    "context"
-    "log"
-
-    "github.com/startvibecoding/vibe-browser/pkg/client"
-)
-
-func main() {
-    ctx := context.Background()
-
-    // Connect to a running daemon
-    c, err := client.Connect(ctx, &client.Options{
-        Session: "my-session",
     })
     if err != nil {
         log.Fatal(err)
@@ -269,38 +279,24 @@ vibe-browser/
 │   ├── mcp/              # MCP server for AI agents
 │   └── protocol/         # Protocol types
 ├── internal/
-│   ├── chrome/           # Chrome launcher
-│   └── server/           # Internal server utilities
-├── docs/                 # Documentation
+│   └── chrome/           # Browser launcher and discovery
+├── npm/                  # npm packages
 ├── scripts/              # Build scripts
-└── examples/             # Example usage
+├── skills/               # AI agent skills
+└── skill-data/           # Skill documentation
 ```
 
 ## Build
 
 ```bash
-make build              # Build binary (4.4MB)
-make build-compressed   # Build with UPX compression (1.9MB)
+make build              # Build binary
 make build-all          # Build for all platforms
 make test               # Run tests
 make clean              # Clean build artifacts
+
+make npm-packages       # Build npm packages
+make npm-publish-all    # Publish to npm
 ```
-
-## Environment Variables
-
-- `VIBE_BROWSER_CDP_URL`: Same as --cdp-url flag
-- `VIBE_BROWSER_SESSION`: Same as --session flag
-- `VIBE_BROWSER_SOCKET_DIR`: Override default socket directory
-- `VIBE_BROWSER_DEBUG`: Enable debug logging
-- `CHROME_PATH`: Path to Chrome executable
-
-## Dependencies
-
-Minimal dependencies using Go standard library:
-
-- `golang.org/x/net` - WebSocket client (official Go extension)
-- `golang.org/x/text` - Indirect dependency
-- Standard library `flag` - CLI parsing (no cobra/pflag)
 
 ## Comparison with agent-browser
 
@@ -312,7 +308,7 @@ Minimal dependencies using Go standard library:
 | MCP Server | ✓ | ✓ |
 | Daemon Mode | ✓ | ✓ |
 | CDP Protocol | ✓ | ✓ |
-| WebDriver | ✓ | Planned |
+| Multi-Browser | Chrome, Chromium, Brave | Chrome, Chromium, Brave, Edge |
 | Binary Size | ~10MB | 4.4MB (1.9MB compressed) |
 
 ## License

@@ -28,7 +28,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/startvibecoding/vibe-browser/internal/chrome"
 	"github.com/startvibecoding/vibe-browser/pkg/browser"
+	"github.com/startvibecoding/vibe-browser/pkg/cdp"
 	"github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
@@ -71,6 +73,7 @@ func main() {
 	var session string
 	var headless bool
 	var execPath string
+	var browserType string
 
 	// Parse global flags from environment
 	if v := os.Getenv("VIBE_BROWSER_CDP_URL"); v != "" {
@@ -81,6 +84,9 @@ func main() {
 	} else {
 		session = "default"
 	}
+	if v := os.Getenv("VIBE_BROWSER_BROWSER"); v != "" {
+		browserType = v
+	}
 	headless = true
 
 	// Parse command-specific flags
@@ -89,6 +95,7 @@ func main() {
 	fs.StringVar(&session, "session", session, "Session name")
 	fs.BoolVar(&headless, "headless", headless, "Run browser in headless mode")
 	fs.StringVar(&execPath, "executable-path", execPath, "Path to Chrome executable")
+	fs.StringVar(&browserType, "browser", browserType, "Browser type (chrome, chromium, brave, edge)")
 
 	// Command-specific flags
 	var value string
@@ -182,6 +189,12 @@ func main() {
 		err = cmdMCP(ctx, session)
 	case "close":
 		err = cmdClose(ctx, cdpURL, session, headless, execPath)
+	case "discover":
+		err = cmdDiscover()
+	case "browsers":
+		err = cmdListBrowsers()
+	case "profiles":
+		err = cmdListProfiles()
 	case "version":
 		fmt.Printf("vibe-browser version %s\n", version)
 	case "help", "--help", "-h":
@@ -229,6 +242,9 @@ Commands:
   wait <subcommand>       Wait for conditions
   set <subcommand>        Set browser properties
   cookies <subcommand>    Manage cookies
+  discover                Discover running browser CDP URL
+  browsers                List available browsers
+  profiles                List Chrome profiles
   daemon                  Start daemon server
   mcp                     Start MCP server
   close                   Close browser session
@@ -240,24 +256,93 @@ Flags:
   --session string        Session name (default "default")
   --headless              Run in headless mode (default true)
   --executable-path       Path to Chrome executable
+  --browser string        Browser type (chrome, chromium, brave, edge)
 
 Environment Variables:
   VIBE_BROWSER_CDP_URL    Same as --cdp-url
   VIBE_BROWSER_SESSION    Same as --session
+  VIBE_BROWSER_BROWSER    Same as --browser
   VIBE_BROWSER_DEBUG      Enable debug logging
   VIBE_BROWSER_SOCKET_DIR Override socket directory
   CHROME_PATH             Path to Chrome executable
+
+Browser Discovery:
+  vibe-browser discover                   Auto-detect running browser
+  vibe-browser browsers                   List installed browsers
+  vibe-browser profiles                   List Chrome profiles
+  vibe-browser open --cdp-url ws://...    Connect to specific CDP endpoint
+
+Supported Browsers:
+  Chrome, Chromium, Brave, Edge, Chrome Canary
+
+Examples:
+  # Open a page in Chrome (default)
+  vibe-browser open https://example.com
+
+  # Open in Brave
+  vibe-browser open --browser brave https://example.com
+
+  # Connect to running browser
+  vibe-browser open --cdp-url ws://127.0.0.1:9222/devtools/browser
+
+  # Take a snapshot
+  vibe-browser snapshot -i
+
+  # Click an element
+  vibe-browser click "button.submit"
+
+  # Take a screenshot
+  vibe-browser screenshot -o page.png
 `)
 }
 
 // connectBrowser connects to a browser via CDP URL or launches one.
-func connectBrowser(ctx context.Context, cdpURL, session string, headless bool, execPath string) (*browser.Browser, error) {
+func connectBrowser(ctx context.Context, cdpURL, session string, headless bool, execPath string, browserType ...string) (*browser.Browser, error) {
+	// If CDP URL is provided, connect directly
 	if cdpURL != "" {
 		return browser.ConnectToCDP(ctx, cdpURL, logger)
 	}
 
-	// TODO: Connect to daemon or launch browser
-	return nil, fmt.Errorf("no CDP URL provided; use --cdp-url flag")
+	// Try to auto-connect to a running browser
+	wsURL, err := chrome.AutoConnectCDP()
+	if err == nil {
+		logger.Info("auto-connected to browser", "url", wsURL)
+		b, err := browser.ConnectToCDP(ctx, wsURL, logger)
+		if err != nil {
+			return nil, err
+		}
+		// For auto-connected browsers, we don't have a process to kill
+		// The user started it themselves
+		return b, nil
+	}
+
+	// Launch a new browser
+	bt := chrome.BrowserChrome
+	if len(browserType) > 0 && browserType[0] != "" {
+		bt = chrome.BrowserType(browserType[0])
+	}
+
+	proc, err := chrome.Launch(ctx, chrome.LaunchOptions{
+		Browser:        bt,
+		ExecutablePath: execPath,
+		Headless:       headless,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("launch browser: %w", err)
+	}
+
+	b, err := browser.ConnectToCDP(ctx, proc.CDPURL, logger)
+	if err != nil {
+		proc.Kill() // Kill the process if we can't connect
+		return nil, err
+	}
+
+	// Set the process killer so the browser is killed when Close() is called
+	b.SetProcessKiller(func() {
+		proc.Kill()
+	})
+
+	return b, nil
 }
 
 // Command implementations
@@ -769,11 +854,89 @@ func cmdMCP(ctx context.Context, session string) error {
 }
 
 func cmdClose(ctx context.Context, cdpURL, session string, headless bool, execPath string) error {
-	b, err := connectBrowser(ctx, cdpURL, session, headless, execPath)
+	// If CDP URL is provided, close that specific browser
+	if cdpURL != "" {
+		return closeBrowserByCDP(ctx, cdpURL)
+	}
+
+	// Try to find and close a running browser
+	wsURL, err := chrome.AutoConnectCDP()
+	if err != nil {
+		return fmt.Errorf("no running browser found")
+	}
+
+	return closeBrowserByCDP(ctx, wsURL)
+}
+
+// closeBrowserByCDP closes a browser via CDP by sending Browser.close command.
+func closeBrowserByCDP(ctx context.Context, wsURL string) error {
+	client, err := cdp.Connect(ctx, wsURL, logger)
+	if err != nil {
+		return fmt.Errorf("connect to browser: %w", err)
+	}
+	defer client.Close()
+
+	// Send Browser.close command
+	_, err = client.Send(ctx, "Browser.close", nil)
+	if err != nil {
+		// If Browser.close fails, try to close the connection
+		logger.Debug("Browser.close failed", "error", err)
+	}
+
+	fmt.Println("Browser closed")
+	return nil
+}
+
+func cmdDiscover() error {
+	// Try to auto-connect to a running browser
+	wsURL, err := chrome.AutoConnectCDP()
 	if err != nil {
 		return err
 	}
-	return b.Close()
+	fmt.Println(wsURL)
+	return nil
+}
+
+func cmdListBrowsers() error {
+	browsers := []struct {
+		Name string
+		Type chrome.BrowserType
+	}{
+		{"Chrome", chrome.BrowserChrome},
+		{"Chromium", chrome.BrowserChromium},
+		{"Brave", chrome.BrowserBrave},
+		{"Edge", chrome.BrowserEdge},
+		{"Chrome Canary", chrome.BrowserChromeCanary},
+	}
+
+	fmt.Println("Available browsers:")
+	for _, b := range browsers {
+		path, err := chrome.FindBrowser(b.Type)
+		if err != nil {
+			fmt.Printf("  %-15s not found\n", b.Name)
+		} else {
+			fmt.Printf("  %-15s %s\n", b.Name, path)
+		}
+	}
+	return nil
+}
+
+func cmdListProfiles() error {
+	userDir := chrome.FindChromeUserDataDir()
+	if userDir == "" {
+		return fmt.Errorf("no Chrome user data directory found")
+	}
+
+	profiles := chrome.ListChromeProfiles(userDir)
+	if len(profiles) == 0 {
+		return fmt.Errorf("no profiles found in %s", userDir)
+	}
+
+	fmt.Printf("Chrome profiles in %s:\n", userDir)
+	for _, p := range profiles {
+		fmt.Printf("  %-20s %s\n", p["directory"], p["name"])
+	}
+	return nil
 }
 
 // Helper: parse float from string

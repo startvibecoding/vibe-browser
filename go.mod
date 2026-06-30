@@ -3,8 +3,8 @@ module github.com/startvibecoding/vibe-browser
 go 1.22
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/net v0.33.0
 )
 
 require (

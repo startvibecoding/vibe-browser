@@ -15,7 +15,7 @@ Shows the complete accessibility tree including all elements.
 ### Interactive Snapshot (Recommended)
 
 ```bash
-vibe-browser snapshot -i
+vibe-browser snapshot --interactive
 ```
 
 Shows only interactive elements (buttons, inputs, links, etc.). This is the preferred mode for AI agents as it reduces noise.
@@ -23,7 +23,7 @@ Shows only interactive elements (buttons, inputs, links, etc.). This is the pref
 ### Compact Snapshot
 
 ```bash
-vibe-browser snapshot -i -c
+vibe-browser snapshot --interactive --compact
 ```
 
 Removes empty structural nodes for cleaner output.
@@ -104,3 +104,12 @@ vibe-browser click "form button[type='submit']"
 vibe-browser get text ".card .title"
 vibe-browser click ".modal .close-button"
 ```
+
+## Supported Browsers
+
+The snapshot feature works with all supported browsers:
+- Chrome
+- Chromium
+- Brave
+- Edge
+- Chrome Canary

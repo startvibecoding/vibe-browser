@@ -8,14 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
 // Message represents a CDP JSON message (command or response/event).
@@ -62,28 +61,20 @@ func Connect(ctx context.Context, wsURL string, logger *slog.Logger) (*Client, e
 		logger = slog.Default()
 	}
 
-	// Create WebSocket config
-	config, err := websocket.NewConfig(wsURL, wsURL)
-	if err != nil {
-		return nil, fmt.Errorf("cdp: config: %w", err)
+	// Create WebSocket dialer with proper headers
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
 	}
 
-	// Dial with context
-	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", config.Location.Host)
+	conn, _, err := dialer.DialContext(ctx, wsURL, http.Header{
+		"User-Agent": []string{"vibe-browser/0.1.0"},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("cdp: dial %s: %w", wsURL, err)
-	}
-
-	// Perform WebSocket handshake
-	ws, err := websocket.NewClient(config, conn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("cdp: handshake: %w", err)
+		return nil, fmt.Errorf("cdp: connect %s: %w", wsURL, err)
 	}
 
 	c := &Client{
-		conn:    ws,
+		conn:    conn,
 		pending: make(map[int64]chan *Message),
 		eventCh: make(chan Event, 4096),
 		done:    make(chan struct{}),
@@ -101,10 +92,9 @@ func (c *Client) readLoop() {
 	defer close(c.done)
 
 	for {
-		var data string
-		err := websocket.Message.Receive(c.conn, &data)
+		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			if err != io.EOF {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				c.logger.Debug("cdp: read error", "err", err)
 			}
 			c.mu.Lock()
@@ -117,8 +107,8 @@ func (c *Client) readLoop() {
 		}
 
 		var msg Message
-		if err := json.Unmarshal([]byte(data), &msg); err != nil {
-			c.logger.Warn("cdp: unmarshal error", "err", err, "data", data)
+		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("cdp: unmarshal error", "err", err, "data", string(data))
 			continue
 		}
 
@@ -154,8 +144,7 @@ func (c *Client) keepalive(ctx context.Context) {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			c.conn.PayloadType = websocket.PingFrame
-			if _, err := c.conn.Write(nil); err != nil {
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
@@ -193,7 +182,7 @@ func (c *Client) Send(ctx context.Context, method string, params any) (*Message,
 	}
 
 	c.mu.Lock()
-	if err := websocket.Message.Send(c.conn, string(data)); err != nil {
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("cdp: write: %w", err)
@@ -246,7 +235,7 @@ func (c *Client) SendToSession(ctx context.Context, method string, params any, s
 	}
 
 	c.mu.Lock()
-	if err := websocket.Message.Send(c.conn, string(data)); err != nil {
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("cdp: write: %w", err)
@@ -281,11 +270,11 @@ func (c *Client) Events() <-chan Event {
 func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		// Send close frame
-		closeData := []byte{0x03, 0xe8} // StatusNormalClosure = 1000
-		c.conn.PayloadType = websocket.BinaryFrame
-		c.conn.Write(closeData)
-		err = c.conn.Close()
+		err = c.conn.WriteMessage(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		)
+		c.conn.Close()
 	})
 	return err
 }

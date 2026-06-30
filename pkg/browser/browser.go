@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -17,13 +18,27 @@ import (
 	"github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
+// Target represents a browser target (page, background_page, etc.)
+type Target struct {
+	ID                     string `json:"id"`
+	Title                  string `json:"title"`
+	URL                    string `json:"url"`
+	Type                   string `json:"type"`
+	WebBrowserDebuggerURL  string `json:"webSocketDebuggerUrl"`
+}
+
+// ProcessKiller is a function that kills a browser process.
+// This is used to avoid importing the chrome package directly.
+type ProcessKiller func()
+
 // Browser represents a connected browser instance.
 type Browser struct {
-	cdp      *cdp.Client
-	logger   *slog.Logger
-	targetID string
-	sessionID string
-	refs     map[string]string // ref ID -> backend node ID
+	cdp       *cdp.Client
+	logger    *slog.Logger
+	browserURL string // Browser-level WebSocket URL
+	pageCDP   *cdp.Client // Page-level CDP client
+	pageTarget *Target
+	processKiller ProcessKiller // Function to kill the browser process
 }
 
 // New creates a new Browser from an existing CDP client.
@@ -34,31 +49,167 @@ func New(client *cdp.Client, logger *slog.Logger) *Browser {
 	return &Browser{
 		cdp:    client,
 		logger: logger,
-		refs:   make(map[string]string),
 	}
 }
 
 // ConnectToCDP connects to a browser's CDP WebSocket URL and returns a Browser.
 func ConnectToCDP(ctx context.Context, wsURL string, logger *slog.Logger) (*Browser, error) {
-	client, err := cdp.Connect(ctx, wsURL, logger)
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	b := &Browser{
+		browserURL: wsURL,
+		logger:     logger,
+	}
+
+	// Try to find and connect to a page target
+	if err := b.connectToPage(ctx); err != nil {
+		return nil, fmt.Errorf("connect to page: %w", err)
+	}
+
+	return b, nil
+}
+
+// connectToPage finds a page target and connects to it.
+func (b *Browser) connectToPage(ctx context.Context) error {
+	// Get the host:port from the browser URL
+	host, port := extractHostPort(b.browserURL)
+
+	// List targets
+	targets, err := listTargets(host, port)
+	if err != nil {
+		return fmt.Errorf("list targets: %w", err)
+	}
+
+	// Find a page target
+	var pageTarget *Target
+	for _, t := range targets {
+		if t.Type == "page" {
+			pageTarget = &t
+			break
+		}
+	}
+
+	// If no page target, create one
+	if pageTarget == nil {
+		pageTarget, err = b.createTarget(ctx, host, port)
+		if err != nil {
+			return fmt.Errorf("create target: %w", err)
+		}
+	}
+
+	// Connect to the page target
+	b.pageTarget = pageTarget
+	pageCDP, err := cdp.Connect(ctx, pageTarget.WebBrowserDebuggerURL, b.logger)
+	if err != nil {
+		return fmt.Errorf("connect to page target: %w", err)
+	}
+	b.pageCDP = pageCDP
+
+	return nil
+}
+
+// createTarget creates a new page target.
+func (b *Browser) createTarget(ctx context.Context, host string, port int) (*Target, error) {
+	url := fmt.Sprintf("http://%s:%d/json/new?about:blank", host, port)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("create target: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var target Target
+	if err := json.NewDecoder(resp.Body).Decode(&target); err != nil {
+		return nil, fmt.Errorf("decode target: %w", err)
+	}
+
+	return &target, nil
+}
+
+// listTargets returns the list of browser targets.
+func listTargets(host string, port int) ([]Target, error) {
+	url := fmt.Sprintf("http://%s:%d/json/list", host, port)
+	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
-	return New(client, logger), nil
+	defer resp.Body.Close()
+
+	var targets []Target
+	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+		return nil, err
+	}
+
+	return targets, nil
 }
 
-// Close closes the CDP connection.
+// extractHostPort extracts host and port from a WebSocket URL.
+func extractHostPort(wsURL string) (string, int) {
+	// ws://127.0.0.1:9222/devtools/browser/xxx
+	url := strings.TrimPrefix(wsURL, "ws://")
+	url = strings.TrimPrefix(url, "wss://")
+	
+	parts := strings.SplitN(url, "/", 2)
+	hostPort := parts[0]
+	
+	hostParts := strings.SplitN(hostPort, ":", 2)
+	host := hostParts[0]
+	port := 9222
+	if len(hostParts) > 1 {
+		fmt.Sscanf(hostParts[1], "%d", &port)
+	}
+	
+	return host, port
+}
+
+// SetProcessKiller sets a function that will be called to kill the browser process.
+func (b *Browser) SetProcessKiller(killer ProcessKiller) {
+	b.processKiller = killer
+}
+
+// Close closes the CDP connection and kills the browser process.
 func (b *Browser) Close() error {
-	return b.cdp.Close()
+	// Kill the browser process if we have a killer
+	if b.processKiller != nil {
+		b.processKiller()
+	}
+	
+	if b.pageCDP != nil {
+		return b.pageCDP.Close()
+	}
+	if b.cdp != nil {
+		return b.cdp.Close()
+	}
+	return nil
 }
 
 // IsConnected reports whether the CDP connection is alive.
 func (b *Browser) IsConnected() bool {
-	return b.cdp.IsConnected()
+	if b.pageCDP != nil {
+		return b.pageCDP.IsConnected()
+	}
+	return false
+}
+
+// getClient returns the page-level CDP client.
+func (b *Browser) getClient() *cdp.Client {
+	if b.pageCDP != nil {
+		return b.pageCDP
+	}
+	return b.cdp
 }
 
 // Navigate navigates the browser to a URL.
 func (b *Browser) Navigate(ctx context.Context, url string, opts *protocol.NavigationOptions) error {
+	client := b.getClient()
+	
+	// Enable Page domain first
+	_, err := client.Send(ctx, "Page.enable", nil)
+	if err != nil {
+		return fmt.Errorf("navigate: enable Page: %w", err)
+	}
+
 	params := map[string]any{"url": url}
 
 	if opts != nil {
@@ -70,7 +221,7 @@ func (b *Browser) Navigate(ctx context.Context, url string, opts *protocol.Navig
 		}
 	}
 
-	msg, err := b.cdp.Send(ctx, "Page.navigate", params)
+	msg, err := client.Send(ctx, "Page.navigate", params)
 	if err != nil {
 		return fmt.Errorf("navigate: %w", err)
 	}
@@ -93,6 +244,8 @@ func (b *Browser) Navigate(ctx context.Context, url string, opts *protocol.Navig
 
 // waitForLoad waits for a specific load state.
 func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) error {
+	client := b.getClient()
+	
 	if timeout == 0 {
 		timeout = 30000
 	}
@@ -102,7 +255,7 @@ func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) er
 
 	switch state {
 	case "load":
-		_, err := b.cdp.Send(waitCtx, "Page.enable", nil)
+		_, err := client.Send(waitCtx, "Page.enable", nil)
 		if err != nil {
 			return err
 		}
@@ -111,14 +264,14 @@ func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) er
 			select {
 			case <-waitCtx.Done():
 				return waitCtx.Err()
-			case evt := <-b.cdp.Events():
+			case evt := <-client.Events():
 				if evt.Method == "Page.loadEventFired" {
 					return nil
 				}
 			}
 		}
 	case "domcontentloaded":
-		_, err := b.cdp.Send(waitCtx, "Page.enable", nil)
+		_, err := client.Send(waitCtx, "Page.enable", nil)
 		if err != nil {
 			return err
 		}
@@ -126,7 +279,7 @@ func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) er
 			select {
 			case <-waitCtx.Done():
 				return waitCtx.Err()
-			case evt := <-b.cdp.Events():
+			case evt := <-client.Events():
 				if evt.Method == "Page.domContentEventFired" {
 					return nil
 				}
@@ -141,7 +294,9 @@ func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) er
 
 // waitForNetworkIdle waits until there are no more than 0 network connections for 500ms.
 func (b *Browser) waitForNetworkIdle(ctx context.Context, timeout int) error {
-	_, err := b.cdp.Send(ctx, "Network.enable", nil)
+	client := b.getClient()
+	
+	_, err := client.Send(ctx, "Network.enable", nil)
 	if err != nil {
 		return err
 	}
@@ -154,7 +309,7 @@ func (b *Browser) waitForNetworkIdle(ctx context.Context, timeout int) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case evt := <-b.cdp.Events():
+		case evt := <-client.Events():
 			switch evt.Method {
 			case "Network.requestWillBeSent":
 				pending++
@@ -176,25 +331,29 @@ func (b *Browser) waitForNetworkIdle(ctx context.Context, timeout int) error {
 
 // Reload reloads the current page.
 func (b *Browser) Reload(ctx context.Context) error {
-	_, err := b.cdp.Send(ctx, "Page.reload", nil)
+	client := b.getClient()
+	_, err := client.Send(ctx, "Page.reload", nil)
 	return err
 }
 
 // GoBack navigates back in history.
 func (b *Browser) GoBack(ctx context.Context) error {
-	_, err := b.cdp.Send(ctx, "Page.goBack", nil)
+	client := b.getClient()
+	_, err := client.Send(ctx, "Page.goBack", nil)
 	return err
 }
 
 // GoForward navigates forward in history.
 func (b *Browser) GoForward(ctx context.Context) error {
-	_, err := b.cdp.Send(ctx, "Page.goForward", nil)
+	client := b.getClient()
+	_, err := client.Send(ctx, "Page.goForward", nil)
 	return err
 }
 
 // GetURL returns the current page URL.
 func (b *Browser) GetURL(ctx context.Context) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression":    "window.location.href",
 		"returnByValue": true,
 	})
@@ -216,7 +375,8 @@ func (b *Browser) GetURL(ctx context.Context) (string, error) {
 
 // GetTitle returns the current page title.
 func (b *Browser) GetTitle(ctx context.Context) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression":    "document.title",
 		"returnByValue": true,
 	})
@@ -255,8 +415,10 @@ func (b *Browser) Click(ctx context.Context, selector string, opts *protocol.Cli
 		}
 	}
 
+	client := b.getClient()
+
 	// Dispatch mousePressed
-	_, err = b.cdp.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
+	_, err = client.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type":       "mousePressed",
 		"x":          x,
 		"y":          y,
@@ -272,7 +434,7 @@ func (b *Browser) Click(ctx context.Context, selector string, opts *protocol.Cli
 	}
 
 	// Dispatch mouseReleased
-	_, err = b.cdp.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
+	_, err = client.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type":       "mouseReleased",
 		"x":          x,
 		"y":          y,
@@ -293,8 +455,10 @@ func (b *Browser) DoubleClick(ctx context.Context, selector string) error {
 
 // Fill fills an input element with a value.
 func (b *Browser) Fill(ctx context.Context, selector string, value string) error {
+	client := b.getClient()
+	
 	// Focus the element
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -310,7 +474,7 @@ func (b *Browser) Fill(ctx context.Context, selector string, value string) error
 	}
 
 	// Select all existing text
-	_, err = b.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
+	_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type":     "keyDown",
 		"key":      "a",
 		"code":     "KeyA",
@@ -321,7 +485,7 @@ func (b *Browser) Fill(ctx context.Context, selector string, value string) error
 	}
 
 	// Type the new value
-	_, err = b.cdp.Send(ctx, "Input.insertText", map[string]any{
+	_, err = client.Send(ctx, "Input.insertText", map[string]any{
 		"text": value,
 	})
 	if err != nil {
@@ -333,8 +497,10 @@ func (b *Browser) Fill(ctx context.Context, selector string, value string) error
 
 // Type types text character by character.
 func (b *Browser) Type(ctx context.Context, selector string, text string, delay int) error {
+	client := b.getClient()
+	
 	// Focus the element
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -354,7 +520,7 @@ func (b *Browser) Type(ctx context.Context, selector string, text string, delay 
 	}
 
 	for _, ch := range text {
-		_, err = b.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
+		_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 			"type": "keyDown",
 			"text": string(ch),
 		})
@@ -362,7 +528,7 @@ func (b *Browser) Type(ctx context.Context, selector string, text string, delay 
 			return fmt.Errorf("type keydown: %w", err)
 		}
 
-		_, err = b.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
+		_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 			"type":  "keyUp",
 			"text":  string(ch),
 		})
@@ -380,7 +546,9 @@ func (b *Browser) Type(ctx context.Context, selector string, text string, delay 
 
 // Press presses a keyboard key.
 func (b *Browser) Press(ctx context.Context, key string) error {
-	_, err := b.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
+	client := b.getClient()
+	
+	_, err := client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type": "keyDown",
 		"key":  key,
 	})
@@ -388,7 +556,7 @@ func (b *Browser) Press(ctx context.Context, key string) error {
 		return err
 	}
 
-	_, err = b.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
+	_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type": "keyUp",
 		"key":  key,
 	})
@@ -402,7 +570,8 @@ func (b *Browser) Hover(ctx context.Context, selector string) error {
 		return fmt.Errorf("hover: %w", err)
 	}
 
-	_, err = b.cdp.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
+	client := b.getClient()
+	_, err = client.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type": "mouseMoved",
 		"x":    x,
 		"y":    y,
@@ -412,7 +581,8 @@ func (b *Browser) Hover(ctx context.Context, selector string) error {
 
 // Scroll scrolls the page.
 func (b *Browser) Scroll(ctx context.Context, deltaX, deltaY float64) error {
-	_, err := b.cdp.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type":   "mouseWheel",
 		"x":      0,
 		"y":      0,
@@ -424,7 +594,8 @@ func (b *Browser) Scroll(ctx context.Context, deltaX, deltaY float64) error {
 
 // Focus focuses an element.
 func (b *Browser) Focus(ctx context.Context, selector string) error {
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -440,7 +611,8 @@ func (b *Browser) Focus(ctx context.Context, selector string) error {
 
 // Check checks a checkbox element.
 func (b *Browser) Check(ctx context.Context, selector string) error {
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -456,7 +628,8 @@ func (b *Browser) Check(ctx context.Context, selector string) error {
 
 // Uncheck unchecks a checkbox element.
 func (b *Browser) Uncheck(ctx context.Context, selector string) error {
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -472,7 +645,8 @@ func (b *Browser) Uncheck(ctx context.Context, selector string) error {
 
 // Select selects an option in a <select> element.
 func (b *Browser) Select(ctx context.Context, selector string, value string) error {
-	_, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -489,7 +663,8 @@ func (b *Browser) Select(ctx context.Context, selector string, value string) err
 
 // Eval evaluates a JavaScript expression and returns the result.
 func (b *Browser) Eval(ctx context.Context, expression string) (any, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression":    expression,
 		"returnByValue": true,
 		"awaitPromise":  true,
@@ -520,7 +695,8 @@ func (b *Browser) Eval(ctx context.Context, expression string) (any, error) {
 
 // GetText returns the text content of an element.
 func (b *Browser) GetText(ctx context.Context, selector string) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -548,6 +724,7 @@ func (b *Browser) GetText(ctx context.Context, selector string) (string, error) 
 
 // GetHTML returns the HTML content of an element or the whole page.
 func (b *Browser) GetHTML(ctx context.Context, selector string) (string, error) {
+	client := b.getClient()
 	expr := "document.documentElement.outerHTML"
 	if selector != "" {
 		expr = fmt.Sprintf(`
@@ -559,7 +736,7 @@ func (b *Browser) GetHTML(ctx context.Context, selector string) (string, error) 
 		`, selector, selector)
 	}
 
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression":    expr,
 		"returnByValue": true,
 	})
@@ -581,7 +758,8 @@ func (b *Browser) GetHTML(ctx context.Context, selector string) (string, error) 
 
 // GetValue returns the value of an input element.
 func (b *Browser) GetValue(ctx context.Context, selector string) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -609,7 +787,8 @@ func (b *Browser) GetValue(ctx context.Context, selector string) (string, error)
 
 // GetAttr returns an attribute value of an element.
 func (b *Browser) GetAttr(ctx context.Context, selector, attr string) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -637,7 +816,8 @@ func (b *Browser) GetAttr(ctx context.Context, selector, attr string) (string, e
 
 // IsVisible checks if an element is visible.
 func (b *Browser) IsVisible(ctx context.Context, selector string) (bool, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -668,7 +848,8 @@ func (b *Browser) IsVisible(ctx context.Context, selector string) (bool, error) 
 
 // IsEnabled checks if an element is enabled.
 func (b *Browser) IsEnabled(ctx context.Context, selector string) (bool, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -696,7 +877,8 @@ func (b *Browser) IsEnabled(ctx context.Context, selector string) (bool, error) 
 
 // IsChecked checks if a checkbox is checked.
 func (b *Browser) IsChecked(ctx context.Context, selector string) (bool, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -724,6 +906,7 @@ func (b *Browser) IsChecked(ctx context.Context, selector string) (bool, error) 
 
 // Screenshot captures a screenshot of the page.
 func (b *Browser) Screenshot(ctx context.Context, opts *protocol.ScreenshotOptions) ([]byte, error) {
+	client := b.getClient()
 	params := map[string]any{}
 
 	if opts != nil {
@@ -752,7 +935,7 @@ func (b *Browser) Screenshot(ctx context.Context, opts *protocol.ScreenshotOptio
 		params["format"] = "png"
 	}
 
-	msg, err := b.cdp.Send(ctx, "Page.captureScreenshot", params)
+	msg, err := client.Send(ctx, "Page.captureScreenshot", params)
 	if err != nil {
 		return nil, fmt.Errorf("screenshot: %w", err)
 	}
@@ -774,19 +957,21 @@ func (b *Browser) Screenshot(ctx context.Context, opts *protocol.ScreenshotOptio
 
 // Snapshot captures an accessibility tree snapshot of the page.
 func (b *Browser) Snapshot(ctx context.Context, opts *protocol.SnapshotOptions) (string, error) {
+	client := b.getClient()
+	
 	// Enable DOM and Accessibility
-	_, err := b.cdp.Send(ctx, "DOM.enable", nil)
+	_, err := client.Send(ctx, "DOM.enable", nil)
 	if err != nil {
 		return "", fmt.Errorf("snapshot: enable DOM: %w", err)
 	}
 
-	_, err = b.cdp.Send(ctx, "Accessibility.enable", nil)
+	_, err = client.Send(ctx, "Accessibility.enable", nil)
 	if err != nil {
 		return "", fmt.Errorf("snapshot: enable Accessibility: %w", err)
 	}
 
 	// Get the full accessibility tree
-	msg, err := b.cdp.Send(ctx, "Accessibility.getFullAXTree", nil)
+	msg, err := client.Send(ctx, "Accessibility.getFullAXTree", nil)
 	if err != nil {
 		return "", fmt.Errorf("snapshot: get AX tree: %w", err)
 	}
@@ -943,7 +1128,8 @@ func formatAXTree(nodes []AXNode, opts *protocol.SnapshotOptions) string {
 
 // resolveElementCenter returns the center coordinates of an element.
 func (b *Browser) resolveElementCenter(ctx context.Context, selector string) (float64, float64, error) {
-	msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 		"expression": fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
@@ -975,8 +1161,10 @@ func (b *Browser) resolveElementCenter(ctx context.Context, selector string) (fl
 
 // resolveNodeID returns the DOM node ID for a selector.
 func (b *Browser) resolveNodeID(ctx context.Context, selector string) (int, error) {
+	client := b.getClient()
+	
 	// First get the document
-	docMsg, err := b.cdp.Send(ctx, "DOM.getDocument", nil)
+	docMsg, err := client.Send(ctx, "DOM.getDocument", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -991,7 +1179,7 @@ func (b *Browser) resolveNodeID(ctx context.Context, selector string) (int, erro
 	}
 
 	// Query selector
-	nodeMsg, err := b.cdp.Send(ctx, "DOM.querySelector", map[string]any{
+	nodeMsg, err := client.Send(ctx, "DOM.querySelector", map[string]any{
 		"nodeId":   docResult.Root.NodeID,
 		"selector": selector,
 	})
@@ -1011,7 +1199,8 @@ func (b *Browser) resolveNodeID(ctx context.Context, selector string) (int, erro
 
 // SetViewport sets the browser viewport size.
 func (b *Browser) SetViewport(ctx context.Context, width, height int, deviceScaleFactor float64) error {
-	_, err := b.cdp.Send(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
 		"width":             width,
 		"height":            height,
 		"deviceScaleFactor": deviceScaleFactor,
@@ -1022,7 +1211,8 @@ func (b *Browser) SetViewport(ctx context.Context, width, height int, deviceScal
 
 // SetGeolocation sets the geolocation.
 func (b *Browser) SetGeolocation(ctx context.Context, lat, lng, accuracy float64) error {
-	_, err := b.cdp.Send(ctx, "Emulation.setGeolocationOverride", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Emulation.setGeolocationOverride", map[string]any{
 		"latitude":  lat,
 		"longitude": lng,
 		"accuracy":  accuracy,
@@ -1032,7 +1222,8 @@ func (b *Browser) SetGeolocation(ctx context.Context, lat, lng, accuracy float64
 
 // SetOffline enables or disables offline mode.
 func (b *Browser) SetOffline(ctx context.Context, offline bool) error {
-	_, err := b.cdp.Send(ctx, "Network.emulateNetworkConditions", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Network.emulateNetworkConditions", map[string]any{
 		"offline":            offline,
 		"latency":            0,
 		"downloadThroughput": -1,
@@ -1043,7 +1234,8 @@ func (b *Browser) SetOffline(ctx context.Context, offline bool) error {
 
 // SetHeaders sets extra HTTP headers.
 func (b *Browser) SetHeaders(ctx context.Context, headers map[string]string) error {
-	_, err := b.cdp.Send(ctx, "Network.setExtraHTTPHeaders", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Network.setExtraHTTPHeaders", map[string]any{
 		"headers": headers,
 	})
 	return err
@@ -1051,7 +1243,8 @@ func (b *Browser) SetHeaders(ctx context.Context, headers map[string]string) err
 
 // GetCookies returns all cookies.
 func (b *Browser) GetCookies(ctx context.Context) ([]protocol.Cookie, error) {
-	msg, err := b.cdp.Send(ctx, "Network.getCookies", nil)
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Network.getCookies", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1068,6 +1261,7 @@ func (b *Browser) GetCookies(ctx context.Context) ([]protocol.Cookie, error) {
 
 // SetCookie sets a cookie.
 func (b *Browser) SetCookie(ctx context.Context, cookie protocol.Cookie) error {
+	client := b.getClient()
 	params := map[string]any{
 		"name":  cookie.Name,
 		"value": cookie.Value,
@@ -1091,13 +1285,14 @@ func (b *Browser) SetCookie(ctx context.Context, cookie protocol.Cookie) error {
 		params["sameSite"] = cookie.SameSite
 	}
 
-	_, err := b.cdp.Send(ctx, "Network.setCookie", params)
+	_, err := client.Send(ctx, "Network.setCookie", params)
 	return err
 }
 
 // ClearCookies clears all cookies.
 func (b *Browser) ClearCookies(ctx context.Context) error {
-	_, err := b.cdp.Send(ctx, "Network.clearBrowserCookies", nil)
+	client := b.getClient()
+	_, err := client.Send(ctx, "Network.clearBrowserCookies", nil)
 	return err
 }
 
@@ -1128,7 +1323,8 @@ func (b *Browser) WaitForSelector(ctx context.Context, selector string, timeout 
 		case <-deadline:
 			return fmt.Errorf("waitForSelector: timeout waiting for %s", selector)
 		case <-ticker.C:
-			msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+			client := b.getClient()
+			msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 				"expression": fmt.Sprintf(`
 					(function() {
 						var el = document.querySelector(%q);
@@ -1174,7 +1370,8 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout int) err
 		case <-deadline:
 			return fmt.Errorf("waitForText: timeout waiting for %q", text)
 		case <-ticker.C:
-			msg, err := b.cdp.Send(ctx, "Runtime.evaluate", map[string]any{
+			client := b.getClient()
+			msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
 				"expression":    "document.body.innerText",
 				"returnByValue": true,
 			})
@@ -1228,7 +1425,8 @@ func (b *Browser) WaitForURL(ctx context.Context, urlPattern string, timeout int
 
 // NewTab opens a new browser tab.
 func (b *Browser) NewTab(ctx context.Context, url string) (string, error) {
-	msg, err := b.cdp.Send(ctx, "Target.createTarget", map[string]any{
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Target.createTarget", map[string]any{
 		"url": url,
 	})
 	if err != nil {
@@ -1247,7 +1445,8 @@ func (b *Browser) NewTab(ctx context.Context, url string) (string, error) {
 
 // CloseTab closes a browser tab.
 func (b *Browser) CloseTab(ctx context.Context, targetID string) error {
-	_, err := b.cdp.Send(ctx, "Target.closeTarget", map[string]any{
+	client := b.getClient()
+	_, err := client.Send(ctx, "Target.closeTarget", map[string]any{
 		"targetId": targetID,
 	})
 	return err
@@ -1255,5 +1454,5 @@ func (b *Browser) CloseTab(ctx context.Context, targetID string) error {
 
 // CDPClient returns the underlying CDP client for advanced usage.
 func (b *Browser) CDPClient() *cdp.Client {
-	return b.cdp
+	return b.getClient()
 }
