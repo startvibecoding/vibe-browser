@@ -282,8 +282,11 @@ vibe-browser/
 │   └── chrome/           # Browser launcher and discovery
 ├── npm/                  # npm packages
 ├── scripts/              # Build scripts
-├── skills/               # AI agent skills
-└── skill-data/           # Skill documentation
+└── skills/               # AI agent skills
+    └── vibe-browser/     # vibe-browser skill
+        ├── SKILL.md      # Main skill file
+        ├── references/   # Reference documentation
+        └── templates/    # Template scripts
 ```
 
 ## Build
