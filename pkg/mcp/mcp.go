@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -16,9 +17,11 @@ import (
 
 // Server is the MCP server.
 type Server struct {
-	logger    *slog.Logger
-	session   string
-	tools     map[string]ToolHandler
+	logger  *slog.Logger
+	session string
+	tools   map[string]ToolHandler
+	in      io.Reader
+	out     io.Writer
 }
 
 // ToolHandler handles an MCP tool call.
@@ -34,6 +37,8 @@ func NewServer(logger *slog.Logger, session string) *Server {
 		logger:  logger,
 		session: session,
 		tools:   make(map[string]ToolHandler),
+		in:      os.Stdin,
+		out:     os.Stdout,
 	}
 
 	s.registerTools()
@@ -89,7 +94,7 @@ func (s *Server) registerTools() {
 
 // Run starts the MCP server, reading from stdin and writing to stdout.
 func (s *Server) Run(ctx context.Context) error {
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(s.in)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for scanner.Scan() {
@@ -781,8 +786,20 @@ func (s *Server) handleToolCall(ctx context.Context, id any, msg map[string]any)
 		return
 	}
 
-	args, _ := params["arguments"].(json.RawMessage)
-	if args == nil {
+	args, err := toolArguments(params["arguments"])
+	if err != nil {
+		s.writeResult(id, map[string]any{
+			"content": []map[string]any{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("Error: %v", err),
+				},
+			},
+			"isError": true,
+		})
+		return
+	}
+	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
 
@@ -827,6 +844,20 @@ func (s *Server) handleToolCall(ctx context.Context, id any, msg map[string]any)
 	s.writeResult(id, map[string]any{
 		"content": content,
 	})
+}
+
+func toolArguments(v any) (json.RawMessage, error) {
+	if v == nil {
+		return nil, nil
+	}
+	if raw, ok := v.(json.RawMessage); ok {
+		return raw, nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
 }
 
 // Tool handlers - these delegate to the daemon or browser
@@ -1168,7 +1199,7 @@ func (s *Server) writeResult(id any, result any) {
 		"result":  result,
 	}
 	data, _ := json.Marshal(resp)
-	fmt.Println(string(data))
+	fmt.Fprintln(s.out, string(data))
 }
 
 // writeError writes a JSON-RPC error response.
@@ -1182,5 +1213,5 @@ func (s *Server) writeError(id any, code int, message string) {
 		},
 	}
 	data, _ := json.Marshal(resp)
-	fmt.Println(string(data))
+	fmt.Fprintln(s.out, string(data))
 }

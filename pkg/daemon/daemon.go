@@ -19,7 +19,6 @@ import (
 
 	"github.com/startvibecoding/vibe-browser/internal/chrome"
 	"github.com/startvibecoding/vibe-browser/pkg/browser"
-	"github.com/startvibecoding/vibe-browser/pkg/cdp"
 	"github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
@@ -30,12 +29,71 @@ type Server struct {
 	pidPath    string
 	version    string
 	listener   net.Listener
-	browser    *browser.Browser
-	chrome     *chrome.Process
+	browser    browserSession
+	chrome     daemonChromeProcess
 	logger     *slog.Logger
 	mu         sync.RWMutex
 	done       chan struct{}
 }
+
+type daemonChromeProcess interface {
+	Kill()
+	CDPWebSocketURL() string
+}
+
+type browserSession interface {
+	Navigate(context.Context, string, *protocol.NavigationOptions) error
+	Reload(context.Context) error
+	GoBack(context.Context) error
+	GoForward(context.Context) error
+	Click(context.Context, string, *protocol.ClickOptions) error
+	DoubleClick(context.Context, string) error
+	Fill(context.Context, string, string) error
+	Type(context.Context, string, string, int) error
+	Press(context.Context, string) error
+	Hover(context.Context, string) error
+	Scroll(context.Context, float64, float64) error
+	Focus(context.Context, string) error
+	Check(context.Context, string) error
+	Uncheck(context.Context, string) error
+	Select(context.Context, string, string) error
+	Eval(context.Context, string) (any, error)
+	GetText(context.Context, string) (string, error)
+	GetHTML(context.Context, string) (string, error)
+	GetValue(context.Context, string) (string, error)
+	GetAttr(context.Context, string, string) (string, error)
+	IsVisible(context.Context, string) (bool, error)
+	IsEnabled(context.Context, string) (bool, error)
+	IsChecked(context.Context, string) (bool, error)
+	GetURL(context.Context) (string, error)
+	GetTitle(context.Context) (string, error)
+	Snapshot(context.Context, *protocol.SnapshotOptions) (string, error)
+	Screenshot(context.Context, *protocol.ScreenshotOptions) ([]byte, error)
+	SetViewport(context.Context, int, int, float64) error
+	SetGeolocation(context.Context, float64, float64, float64) error
+	SetOffline(context.Context, bool) error
+	SetHeaders(context.Context, map[string]string) error
+	GetCookies(context.Context) ([]protocol.Cookie, error)
+	SetCookie(context.Context, protocol.Cookie) error
+	ClearCookies(context.Context) error
+	WaitMS(context.Context, int) error
+	WaitForSelector(context.Context, string, int) error
+	WaitForText(context.Context, string, int) error
+	WaitForURL(context.Context, string, int) error
+	NewTab(context.Context, string) (string, error)
+	CloseTab(context.Context, string) error
+	Close() error
+}
+
+var (
+	launchBrowser = func(ctx context.Context, opts chrome.LaunchOptions, logger *slog.Logger) (daemonChromeProcess, error) {
+		return chrome.Launch(ctx, opts, logger)
+	}
+	connectBrowserCDP = func(ctx context.Context, wsURL string, logger *slog.Logger) (browserSession, error) {
+		return browser.ConnectToCDP(ctx, wsURL, logger)
+	}
+	listenUnix = net.Listen
+)
 
 // Options configures the daemon server.
 type Options struct {
@@ -101,6 +159,7 @@ func (s *Server) Start(ctx context.Context, launchOpts *protocol.LaunchOptions) 
 
 	if launchOpts != nil {
 		chromeOpts.Headless = launchOpts.Headless
+		chromeOpts.Browser = chrome.BrowserType(launchOpts.Browser)
 		chromeOpts.ExecutablePath = launchOpts.ExecutablePath
 		chromeOpts.Args = launchOpts.Args
 		chromeOpts.Proxy = launchOpts.Proxy
@@ -112,25 +171,28 @@ func (s *Server) Start(ctx context.Context, launchOpts *protocol.LaunchOptions) 
 	}
 
 	s.logger.Info("daemon: launching browser", "session", s.session)
-	proc, err := chrome.Launch(ctx, chromeOpts, s.logger)
+	proc, err := launchBrowser(ctx, chromeOpts, s.logger)
 	if err != nil {
 		return fmt.Errorf("daemon: launch browser: %w", err)
 	}
 	s.chrome = proc
 
-	// Connect to browser
-	cdpClient, err := cdp.Connect(ctx, proc.CDPURL, s.logger)
+	// Connect to a page target. High-level browser operations use page-scoped
+	// CDP commands, so daemon mode must mirror SDK direct launch behavior.
+	b, err := connectBrowserCDP(ctx, proc.CDPWebSocketURL(), s.logger)
 	if err != nil {
 		proc.Kill()
 		return fmt.Errorf("daemon: connect to browser: %w", err)
 	}
-	s.browser = browser.New(cdpClient, s.logger)
+	if setter, ok := b.(interface{ SetProcessKiller(browser.ProcessKiller) }); ok {
+		setter.SetProcessKiller(proc.Kill)
+	}
+	s.browser = b
 
 	// Start listening
-	listener, err := net.Listen("unix", s.socketPath)
+	listener, err := listenUnix("unix", s.socketPath)
 	if err != nil {
-		cdpClient.Close()
-		proc.Kill()
+		b.Close()
 		return fmt.Errorf("daemon: listen: %w", err)
 	}
 	s.listener = listener
@@ -210,7 +272,17 @@ func (s *Server) executeCommand(ctx context.Context, action string, req map[stri
 		if url == "" {
 			return protocol.Response{Success: false, Error: "missing url"}
 		}
-		if err := s.browser.Navigate(ctx, url, nil); err != nil {
+		opts := &protocol.NavigationOptions{}
+		if waitUntil, _ := req["waitUntil"].(string); waitUntil != "" {
+			opts.WaitUntil = waitUntil
+		}
+		if timeout, ok := req["timeout"].(float64); ok {
+			opts.Timeout = int(timeout)
+		}
+		if opts.WaitUntil == "" && opts.Timeout == 0 {
+			opts = nil
+		}
+		if err := s.browser.Navigate(ctx, url, opts); err != nil {
 			return protocol.Response{Success: false, Error: err.Error()}
 		}
 		return protocol.Response{Success: true}
@@ -465,7 +537,23 @@ func (s *Server) executeCommand(ctx context.Context, action string, req map[stri
 		return protocol.Response{Success: true, Data: data}
 
 	case "snapshot":
-		snapshot, err := s.browser.Snapshot(ctx, nil)
+		opts := &protocol.SnapshotOptions{}
+		if selector, _ := req["selector"].(string); selector != "" {
+			opts.Selector = selector
+		}
+		if interactive, ok := req["interactive"].(bool); ok {
+			opts.Interactive = interactive
+		}
+		if compact, ok := req["compact"].(bool); ok {
+			opts.Compact = compact
+		}
+		if depth, ok := req["depth"].(float64); ok {
+			opts.Depth = int(depth)
+		}
+		if urls, ok := req["urls"].(bool); ok {
+			opts.URLs = urls
+		}
+		snapshot, err := s.browser.Snapshot(ctx, opts)
 		if err != nil {
 			return protocol.Response{Success: false, Error: err.Error()}
 		}
@@ -481,16 +569,29 @@ func (s *Server) executeCommand(ctx context.Context, action string, req map[stri
 		if fp, ok := req["fullPage"].(bool); ok {
 			fullPage = fp
 		}
-		imgData, err := s.browser.Screenshot(ctx, &protocol.ScreenshotOptions{
+		opts := &protocol.ScreenshotOptions{
 			Format:   format,
 			FullPage: fullPage,
-		})
+		}
+		if quality, ok := req["quality"].(float64); ok {
+			opts.Quality = int(quality)
+		}
+		if selector, _ := req["selector"].(string); selector != "" {
+			opts.Selector = selector
+		}
+		if clipWidth, ok := req["clipWidth"].(float64); ok && clipWidth > 0 {
+			opts.ClipWidth = clipWidth
+			opts.ClipX, _ = req["clipX"].(float64)
+			opts.ClipY, _ = req["clipY"].(float64)
+			opts.ClipHeight, _ = req["clipHeight"].(float64)
+		}
+		imgData, err := s.browser.Screenshot(ctx, opts)
 		if err != nil {
 			return protocol.Response{Success: false, Error: err.Error()}
 		}
 		// Return base64 encoded image
 		data, _ := json.Marshal(map[string]any{
-			"data": imgData,
+			"data":   imgData,
 			"format": format,
 		})
 		return protocol.Response{Success: true, Data: data}
@@ -550,6 +651,34 @@ func (s *Server) executeCommand(ctx context.Context, action string, req map[stri
 		}
 		data, _ := json.Marshal(cookies)
 		return protocol.Response{Success: true, Data: data}
+
+	case "cookies_set":
+		var cookie protocol.Cookie
+		if raw, ok := req["cookie"]; ok {
+			data, _ := json.Marshal(raw)
+			if err := json.Unmarshal(data, &cookie); err != nil {
+				return protocol.Response{Success: false, Error: "invalid cookie"}
+			}
+		} else {
+			name, _ := req["name"].(string)
+			value, _ := req["value"].(string)
+			if name == "" {
+				return protocol.Response{Success: false, Error: "missing cookie name"}
+			}
+			cookie = protocol.Cookie{Name: name, Value: value}
+			cookie.Domain, _ = req["domain"].(string)
+			cookie.Path, _ = req["path"].(string)
+			cookie.SameSite, _ = req["sameSite"].(string)
+			cookie.HTTPOnly, _ = req["httpOnly"].(bool)
+			cookie.Secure, _ = req["secure"].(bool)
+			if expires, ok := req["expires"].(float64); ok {
+				cookie.Expires = expires
+			}
+		}
+		if err := s.browser.SetCookie(ctx, cookie); err != nil {
+			return protocol.Response{Success: false, Error: err.Error()}
+		}
+		return protocol.Response{Success: true}
 
 	case "cookies_clear":
 		if err := s.browser.ClearCookies(ctx); err != nil {

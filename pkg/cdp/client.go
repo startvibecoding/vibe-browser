@@ -48,12 +48,15 @@ type Client struct {
 	conn      *websocket.Conn
 	nextID    atomic.Int64
 	mu        sync.Mutex
+	writeMu   sync.Mutex
 	pending   map[int64]chan *Message
 	eventCh   chan Event
 	done      chan struct{}
 	closeOnce sync.Once
 	logger    *slog.Logger
 }
+
+var keepaliveInterval = 30 * time.Second
 
 // Connect establishes a WebSocket connection to the given CDP URL.
 func Connect(ctx context.Context, wsURL string, logger *slog.Logger) (*Client, error) {
@@ -134,7 +137,7 @@ func (c *Client) readLoop() {
 
 // keepalive sends periodic ping frames.
 func (c *Client) keepalive(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 
 	for {
@@ -144,9 +147,12 @@ func (c *Client) keepalive(ctx context.Context) {
 		case <-c.done:
 			return
 		case <-ticker.C:
+			c.writeMu.Lock()
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.writeMu.Unlock()
 				return
 			}
+			c.writeMu.Unlock()
 		}
 	}
 }
@@ -181,13 +187,15 @@ func (c *Client) Send(ctx context.Context, method string, params any) (*Message,
 		return nil, fmt.Errorf("cdp: marshal command: %w", err)
 	}
 
-	c.mu.Lock()
+	c.writeMu.Lock()
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.writeMu.Unlock()
+		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("cdp: write: %w", err)
 	}
-	c.mu.Unlock()
+	c.writeMu.Unlock()
 
 	select {
 	case msg := <-ch:
@@ -234,13 +242,15 @@ func (c *Client) SendToSession(ctx context.Context, method string, params any, s
 		return nil, fmt.Errorf("cdp: marshal command: %w", err)
 	}
 
-	c.mu.Lock()
+	c.writeMu.Lock()
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.writeMu.Unlock()
+		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("cdp: write: %w", err)
 	}
-	c.mu.Unlock()
+	c.writeMu.Unlock()
 
 	select {
 	case msg := <-ch:
@@ -270,6 +280,9 @@ func (c *Client) Events() <-chan Event {
 func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		_ = c.conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
 		err = c.conn.WriteMessage(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),

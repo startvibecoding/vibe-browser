@@ -13,6 +13,23 @@ import (
 	"github.com/startvibecoding/vibe-browser/pkg/client"
 )
 
+type sdkClient interface {
+	Navigate(context.Context, string) error
+	Title(context.Context) (string, error)
+	URL(context.Context) (string, error)
+	Snapshot(context.Context) (string, error)
+	Screenshot(context.Context) ([]byte, error)
+	GetText(context.Context, string) (string, error)
+	IsVisible(context.Context, string) (bool, error)
+	Close() error
+}
+
+var (
+	openClient    = func(ctx context.Context, opts *client.Options) (sdkClient, error) { return client.Open(ctx, opts) }
+	connectClient = func(ctx context.Context, opts *client.Options) (sdkClient, error) { return client.Connect(ctx, opts) }
+	writeFile     = os.WriteFile
+)
+
 func main() {
 	ctx := context.Background()
 
@@ -28,7 +45,7 @@ func main() {
 func exampleCDP(ctx context.Context) {
 	// Connect to a running Chrome instance
 	// Start Chrome with: google-chrome --remote-debugging-port=9222
-	c, err := client.Open(ctx, &client.Options{
+	c, err := openClient(ctx, &client.Options{
 		CDPURL: "ws://127.0.0.1:9222/devtools/browser",
 	})
 	if err != nil {
@@ -70,7 +87,7 @@ func exampleCDP(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := os.WriteFile("screenshot.png", screenshot, 0644); err != nil {
+	if err := writeFile("screenshot.png", screenshot, 0644); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Screenshot saved to screenshot.png")
@@ -93,7 +110,7 @@ func exampleCDP(ctx context.Context) {
 func exampleDaemon(ctx context.Context) {
 	// Connect to a running daemon
 	// Start daemon with: vibe-browser daemon --session my-session
-	c, err := client.Connect(ctx, &client.Options{
+	c, err := connectClient(ctx, &client.Options{
 		Session: "my-session",
 	})
 	if err != nil {

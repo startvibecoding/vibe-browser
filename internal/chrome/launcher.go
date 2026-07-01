@@ -23,10 +23,10 @@ import (
 type BrowserType string
 
 const (
-	BrowserChrome    BrowserType = "chrome"
-	BrowserChromium  BrowserType = "chromium"
-	BrowserBrave     BrowserType = "brave"
-	BrowserEdge      BrowserType = "edge"
+	BrowserChrome       BrowserType = "chrome"
+	BrowserChromium     BrowserType = "chromium"
+	BrowserBrave        BrowserType = "brave"
+	BrowserEdge         BrowserType = "edge"
 	BrowserChromeCanary BrowserType = "chrome-canary"
 )
 
@@ -82,6 +82,11 @@ type Process struct {
 	CDPURL      string
 	RemotePort  int
 	PID         int
+}
+
+// CDPWebSocketURL returns the browser-level DevTools WebSocket URL.
+func (p *Process) CDPWebSocketURL() string {
+	return p.CDPURL
 }
 
 // DiscoverCDPURL discovers the CDP WebSocket URL from a running browser.
@@ -161,10 +166,10 @@ func discoverFromListEndpoint(host string, port int) (string, error) {
 	}
 
 	var targets []struct {
-		ID                     string `json:"id"`
-		Type                   string `json:"type"`
-		WebBrowserDebuggerURL  string `json:"webSocketDebuggerUrl"`
-		URL                    string `json:"url"`
+		ID                    string `json:"id"`
+		Type                  string `json:"type"`
+		WebBrowserDebuggerURL string `json:"webSocketDebuggerUrl"`
+		URL                   string `json:"url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
 		return "", fmt.Errorf("invalid response: %w", err)
@@ -539,9 +544,6 @@ func Launch(ctx context.Context, opts LaunchOptions, logger *slog.Logger) (*Proc
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start browser: %w", err)
 	}
-
-	// Detach from the process - don't wait for it
-	cmd.Process.Release()
 
 	p := &Process{
 		cmd:         cmd,

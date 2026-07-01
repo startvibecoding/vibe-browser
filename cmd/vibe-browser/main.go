@@ -31,6 +31,8 @@ import (
 	"github.com/startvibecoding/vibe-browser/internal/chrome"
 	"github.com/startvibecoding/vibe-browser/pkg/browser"
 	"github.com/startvibecoding/vibe-browser/pkg/cdp"
+	"github.com/startvibecoding/vibe-browser/pkg/daemon"
+	"github.com/startvibecoding/vibe-browser/pkg/mcp"
 	"github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
@@ -39,8 +41,41 @@ var (
 	logger  *slog.Logger
 )
 
+type daemonServer interface {
+	Start(context.Context, *protocol.LaunchOptions) error
+	Shutdown()
+	Done() <-chan struct{}
+	SocketPath() string
+}
+
+type mcpServer interface {
+	Run(context.Context) error
+}
+
+type closeCDPClient interface {
+	Send(context.Context, string, any) (*cdp.Message, error)
+	Close() error
+}
+
+var (
+	connectBrowser        = connectBrowserDefault
+	autoConnectCDP        = chrome.AutoConnectCDP
+	newDaemonServer       = func(opts *daemon.Options) (daemonServer, error) { return daemon.NewServer(opts) }
+	newMCPServer          = func(logger *slog.Logger, session string) mcpServer { return mcp.NewServer(logger, session) }
+	closeBrowser          = closeBrowserByCDP
+	findBrowser           = chrome.FindBrowser
+	findChromeUserDataDir = chrome.FindChromeUserDataDir
+	listChromeProfiles    = chrome.ListChromeProfiles
+	launchChrome          = chrome.Launch
+	connectToCDP          = browser.ConnectToCDP
+	connectCDPClient      = func(ctx context.Context, wsURL string, logger *slog.Logger) (closeCDPClient, error) {
+		return cdp.Connect(ctx, wsURL, logger)
+	}
+	currentBrowserType string
+	osExit             = os.Exit
+)
+
 func main() {
-	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -51,7 +86,11 @@ func main() {
 		cancel()
 	}()
 
-	// Setup logger
+	setupLogger()
+	osExit(run(ctx, os.Args[1:]))
+}
+
+func setupLogger() {
 	logLevel := slog.LevelInfo
 	if os.Getenv("VIBE_BROWSER_DEBUG") != "" {
 		logLevel = slog.LevelDebug
@@ -59,14 +98,20 @@ func main() {
 	logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
+}
 
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+func run(ctx context.Context, argv []string) int {
+	if logger == nil {
+		setupLogger()
 	}
 
-	command := os.Args[1]
-	args := os.Args[2:]
+	if len(argv) < 1 {
+		printUsage()
+		return 1
+	}
+
+	command := argv[0]
+	args := argv[1:]
 
 	// Global flags
 	var cdpURL string
@@ -90,7 +135,8 @@ func main() {
 	headless = true
 
 	// Parse command-specific flags
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
 	fs.StringVar(&cdpURL, "cdp-url", cdpURL, "Chrome DevTools Protocol WebSocket URL")
 	fs.StringVar(&session, "session", session, "Session name")
 	fs.BoolVar(&headless, "headless", headless, "Run browser in headless mode")
@@ -117,11 +163,13 @@ func main() {
 		fs.StringVar(&format, "format", "png", "Image format (png, jpeg, webp)")
 		fs.BoolVar(&fullPage, "full-page", false, "Capture full scrollable page")
 		fs.StringVar(&output, "output", "", "Output file path")
+		fs.StringVar(&output, "o", "", "Output file path")
 	case "snapshot":
 		fs.BoolVar(&interactive, "interactive", false, "Only show interactive elements")
+		fs.BoolVar(&interactive, "i", false, "Only show interactive elements")
 		fs.BoolVar(&compact, "compact", false, "Compact output")
 	case "set":
-		if len(args) > 0 && args[0] == "viewport" {
+		if hasArg(args, "viewport") {
 			fs.IntVar(&width, "width", 1280, "Viewport width")
 			fs.IntVar(&height, "height", 720, "Viewport height")
 		}
@@ -130,8 +178,17 @@ func main() {
 		fs.Float64Var(&scrollY, "y", 100, "Vertical scroll amount")
 	}
 
-	fs.Parse(args)
+	parseArgs := normalizeFlagArgs(fs, args)
+	if err := fs.Parse(parseArgs); err != nil {
+		return 2
+	}
 	args = fs.Args()
+
+	previousBrowserType := currentBrowserType
+	currentBrowserType = browserType
+	defer func() {
+		currentBrowserType = previousBrowserType
+	}()
 
 	var err error
 	switch command {
@@ -202,13 +259,14 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
-		os.Exit(1)
+		return 1
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func printUsage() {
@@ -296,18 +354,18 @@ Examples:
 `)
 }
 
-// connectBrowser connects to a browser via CDP URL or launches one.
-func connectBrowser(ctx context.Context, cdpURL, session string, headless bool, execPath string, browserType ...string) (*browser.Browser, error) {
+// connectBrowserDefault connects to a browser via CDP URL or launches one.
+func connectBrowserDefault(ctx context.Context, cdpURL, session string, headless bool, execPath string, browserType ...string) (*browser.Browser, error) {
 	// If CDP URL is provided, connect directly
 	if cdpURL != "" {
-		return browser.ConnectToCDP(ctx, cdpURL, logger)
+		return connectToCDP(ctx, cdpURL, logger)
 	}
 
 	// Try to auto-connect to a running browser
-	wsURL, err := chrome.AutoConnectCDP()
+	wsURL, err := autoConnectCDP()
 	if err == nil {
 		logger.Info("auto-connected to browser", "url", wsURL)
-		b, err := browser.ConnectToCDP(ctx, wsURL, logger)
+		b, err := connectToCDP(ctx, wsURL, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -318,11 +376,15 @@ func connectBrowser(ctx context.Context, cdpURL, session string, headless bool, 
 
 	// Launch a new browser
 	bt := chrome.BrowserChrome
+	requestedBrowser := currentBrowserType
 	if len(browserType) > 0 && browserType[0] != "" {
-		bt = chrome.BrowserType(browserType[0])
+		requestedBrowser = browserType[0]
+	}
+	if requestedBrowser != "" {
+		bt = chrome.BrowserType(requestedBrowser)
 	}
 
-	proc, err := chrome.Launch(ctx, chrome.LaunchOptions{
+	proc, err := launchChrome(ctx, chrome.LaunchOptions{
 		Browser:        bt,
 		ExecutablePath: execPath,
 		Headless:       headless,
@@ -331,7 +393,7 @@ func connectBrowser(ctx context.Context, cdpURL, session string, headless bool, 
 		return nil, fmt.Errorf("launch browser: %w", err)
 	}
 
-	b, err := browser.ConnectToCDP(ctx, proc.CDPURL, logger)
+	b, err := connectToCDP(ctx, proc.CDPURL, logger)
 	if err != nil {
 		proc.Kill() // Kill the process if we can't connect
 		return nil, err
@@ -840,37 +902,56 @@ func cmdCookies(ctx context.Context, cdpURL, session string, headless bool, exec
 }
 
 func cmdDaemon(ctx context.Context, session string, headless bool, execPath string) error {
-	// Import daemon package
-	fmt.Println("Starting daemon...")
-	// TODO: Implement daemon
-	return fmt.Errorf("daemon not implemented yet")
+	server, err := newDaemonServer(&daemon.Options{
+		Session:        session,
+		Version:        version,
+		Headless:       headless,
+		ExecutablePath: execPath,
+		Logger:         logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := server.Start(ctx, &protocol.LaunchOptions{
+		Headless:       headless,
+		ExecutablePath: execPath,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("Daemon started for session %q at %s\n", session, server.SocketPath())
+
+	select {
+	case <-ctx.Done():
+		server.Shutdown()
+		return ctx.Err()
+	case <-server.Done():
+		return nil
+	}
 }
 
 func cmdMCP(ctx context.Context, session string) error {
-	// Import mcp package
-	fmt.Println("Starting MCP server...")
-	// TODO: Implement MCP
-	return fmt.Errorf("MCP not implemented yet")
+	return newMCPServer(logger, session).Run(ctx)
 }
 
 func cmdClose(ctx context.Context, cdpURL, session string, headless bool, execPath string) error {
 	// If CDP URL is provided, close that specific browser
 	if cdpURL != "" {
-		return closeBrowserByCDP(ctx, cdpURL)
+		return closeBrowser(ctx, cdpURL)
 	}
 
 	// Try to find and close a running browser
-	wsURL, err := chrome.AutoConnectCDP()
+	wsURL, err := autoConnectCDP()
 	if err != nil {
 		return fmt.Errorf("no running browser found")
 	}
 
-	return closeBrowserByCDP(ctx, wsURL)
+	return closeBrowser(ctx, wsURL)
 }
 
 // closeBrowserByCDP closes a browser via CDP by sending Browser.close command.
 func closeBrowserByCDP(ctx context.Context, wsURL string) error {
-	client, err := cdp.Connect(ctx, wsURL, logger)
+	client, err := connectCDPClient(ctx, wsURL, logger)
 	if err != nil {
 		return fmt.Errorf("connect to browser: %w", err)
 	}
@@ -889,7 +970,7 @@ func closeBrowserByCDP(ctx context.Context, wsURL string) error {
 
 func cmdDiscover() error {
 	// Try to auto-connect to a running browser
-	wsURL, err := chrome.AutoConnectCDP()
+	wsURL, err := autoConnectCDP()
 	if err != nil {
 		return err
 	}
@@ -911,7 +992,7 @@ func cmdListBrowsers() error {
 
 	fmt.Println("Available browsers:")
 	for _, b := range browsers {
-		path, err := chrome.FindBrowser(b.Type)
+		path, err := findBrowser(b.Type)
 		if err != nil {
 			fmt.Printf("  %-15s not found\n", b.Name)
 		} else {
@@ -922,12 +1003,12 @@ func cmdListBrowsers() error {
 }
 
 func cmdListProfiles() error {
-	userDir := chrome.FindChromeUserDataDir()
+	userDir := findChromeUserDataDir()
 	if userDir == "" {
 		return fmt.Errorf("no Chrome user data directory found")
 	}
 
-	profiles := chrome.ListChromeProfiles(userDir)
+	profiles := listChromeProfiles(userDir)
 	if len(profiles) == 0 {
 		return fmt.Errorf("no profiles found in %s", userDir)
 	}
@@ -948,4 +1029,70 @@ func parseFloat(s string) float64 {
 // Helper: check if string contains substring
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+func hasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeFlagArgs(fs *flag.FlagSet, args []string) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+
+		name, ok := flagName(arg)
+		if !ok {
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		f := fs.Lookup(name)
+		if f == nil {
+			flags = append(flags, arg)
+			continue
+		}
+
+		flags = append(flags, arg)
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+
+	return append(flags, positionals...)
+}
+
+func flagName(arg string) (string, bool) {
+	if arg == "-" || !strings.HasPrefix(arg, "-") {
+		return "", false
+	}
+	name := strings.TrimLeft(arg, "-")
+	if name == "" {
+		return "", false
+	}
+	if idx := strings.IndexByte(name, '='); idx >= 0 {
+		name = name[:idx]
+	}
+	return name, name != ""
 }

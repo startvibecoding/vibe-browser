@@ -20,29 +20,53 @@ import (
 
 // Target represents a browser target (page, background_page, etc.)
 type Target struct {
-	ID                     string `json:"id"`
-	Title                  string `json:"title"`
-	URL                    string `json:"url"`
-	Type                   string `json:"type"`
-	WebBrowserDebuggerURL  string `json:"webSocketDebuggerUrl"`
+	ID                    string `json:"id"`
+	Title                 string `json:"title"`
+	URL                   string `json:"url"`
+	Type                  string `json:"type"`
+	WebBrowserDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
 // ProcessKiller is a function that kills a browser process.
 // This is used to avoid importing the chrome package directly.
 type ProcessKiller func()
 
+type cdpClient interface {
+	Send(ctx context.Context, method string, params any) (*cdp.Message, error)
+	Events() <-chan cdp.Event
+	Close() error
+	IsConnected() bool
+}
+
+var connectCDP = func(ctx context.Context, wsURL string, logger *slog.Logger) (cdpClient, error) {
+	return cdp.Connect(ctx, wsURL, logger)
+}
+
 // Browser represents a connected browser instance.
 type Browser struct {
-	cdp       *cdp.Client
-	logger    *slog.Logger
-	browserURL string // Browser-level WebSocket URL
-	pageCDP   *cdp.Client // Page-level CDP client
-	pageTarget *Target
+	cdp           cdpClient
+	logger        *slog.Logger
+	browserURL    string    // Browser-level WebSocket URL
+	pageCDP       cdpClient // Page-level CDP client
+	pageTarget    *Target
 	processKiller ProcessKiller // Function to kill the browser process
 }
 
+type runtimeEvalResult struct {
+	Result struct {
+		Value any    `json:"value"`
+		Type  string `json:"type"`
+	} `json:"result"`
+	ExceptionDetails *struct {
+		Text      string `json:"text"`
+		Exception *struct {
+			Description string `json:"description"`
+		} `json:"exception"`
+	} `json:"exceptionDetails"`
+}
+
 // New creates a new Browser from an existing CDP client.
-func New(client *cdp.Client, logger *slog.Logger) *Browser {
+func New(client cdpClient, logger *slog.Logger) *Browser {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -101,7 +125,7 @@ func (b *Browser) connectToPage(ctx context.Context) error {
 
 	// Connect to the page target
 	b.pageTarget = pageTarget
-	pageCDP, err := cdp.Connect(ctx, pageTarget.WebBrowserDebuggerURL, b.logger)
+	pageCDP, err := connectCDP(ctx, pageTarget.WebBrowserDebuggerURL, b.logger)
 	if err != nil {
 		return fmt.Errorf("connect to page target: %w", err)
 	}
@@ -149,17 +173,17 @@ func extractHostPort(wsURL string) (string, int) {
 	// ws://127.0.0.1:9222/devtools/browser/xxx
 	url := strings.TrimPrefix(wsURL, "ws://")
 	url = strings.TrimPrefix(url, "wss://")
-	
+
 	parts := strings.SplitN(url, "/", 2)
 	hostPort := parts[0]
-	
+
 	hostParts := strings.SplitN(hostPort, ":", 2)
 	host := hostParts[0]
 	port := 9222
 	if len(hostParts) > 1 {
 		fmt.Sscanf(hostParts[1], "%d", &port)
 	}
-	
+
 	return host, port
 }
 
@@ -170,18 +194,19 @@ func (b *Browser) SetProcessKiller(killer ProcessKiller) {
 
 // Close closes the CDP connection and kills the browser process.
 func (b *Browser) Close() error {
-	// Kill the browser process if we have a killer
+	var err error
+	if b.pageCDP != nil {
+		err = b.pageCDP.Close()
+	}
+	if b.cdp != nil && b.cdp != b.pageCDP {
+		if closeErr := b.cdp.Close(); err == nil {
+			err = closeErr
+		}
+	}
 	if b.processKiller != nil {
 		b.processKiller()
 	}
-	
-	if b.pageCDP != nil {
-		return b.pageCDP.Close()
-	}
-	if b.cdp != nil {
-		return b.cdp.Close()
-	}
-	return nil
+	return err
 }
 
 // IsConnected reports whether the CDP connection is alive.
@@ -189,21 +214,64 @@ func (b *Browser) IsConnected() bool {
 	if b.pageCDP != nil {
 		return b.pageCDP.IsConnected()
 	}
-	return false
+	return b.cdp != nil && b.cdp.IsConnected()
 }
 
 // getClient returns the page-level CDP client.
-func (b *Browser) getClient() *cdp.Client {
+func (b *Browser) getClient() cdpClient {
 	if b.pageCDP != nil {
 		return b.pageCDP
 	}
 	return b.cdp
 }
 
+func (b *Browser) eval(ctx context.Context, expression string) (*runtimeEvalResult, error) {
+	client := b.getClient()
+	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
+		"expression":    expression,
+		"returnByValue": true,
+		"awaitPromise":  true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var result runtimeEvalResult
+	if err := json.Unmarshal(msg.Result, &result); err != nil {
+		return nil, err
+	}
+	if result.ExceptionDetails != nil {
+		text := result.ExceptionDetails.Text
+		if result.ExceptionDetails.Exception != nil && result.ExceptionDetails.Exception.Description != "" {
+			text = result.ExceptionDetails.Exception.Description
+		}
+		return nil, fmt.Errorf("runtime exception: %s", text)
+	}
+	return &result, nil
+}
+
+func resultString(result *runtimeEvalResult) string {
+	if result == nil || result.Result.Value == nil {
+		return ""
+	}
+	if s, ok := result.Result.Value.(string); ok {
+		return s
+	}
+	return fmt.Sprint(result.Result.Value)
+}
+
+func resultBool(result *runtimeEvalResult) bool {
+	if result == nil {
+		return false
+	}
+	v, _ := result.Result.Value.(bool)
+	return v
+}
+
 // Navigate navigates the browser to a URL.
 func (b *Browser) Navigate(ctx context.Context, url string, opts *protocol.NavigationOptions) error {
 	client := b.getClient()
-	
+
 	// Enable Page domain first
 	_, err := client.Send(ctx, "Page.enable", nil)
 	if err != nil {
@@ -245,7 +313,7 @@ func (b *Browser) Navigate(ctx context.Context, url string, opts *protocol.Navig
 // waitForLoad waits for a specific load state.
 func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) error {
 	client := b.getClient()
-	
+
 	if timeout == 0 {
 		timeout = 30000
 	}
@@ -295,7 +363,7 @@ func (b *Browser) waitForLoad(ctx context.Context, state string, timeout int) er
 // waitForNetworkIdle waits until there are no more than 0 network connections for 500ms.
 func (b *Browser) waitForNetworkIdle(ctx context.Context, timeout int) error {
 	client := b.getClient()
-	
+
 	_, err := client.Send(ctx, "Network.enable", nil)
 	if err != nil {
 		return err
@@ -352,48 +420,20 @@ func (b *Browser) GoForward(ctx context.Context) error {
 
 // GetURL returns the current page URL.
 func (b *Browser) GetURL(ctx context.Context) (string, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression":    "window.location.href",
-		"returnByValue": true,
-	})
+	result, err := b.eval(ctx, "window.location.href")
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // GetTitle returns the current page title.
 func (b *Browser) GetTitle(ctx context.Context) (string, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression":    "document.title",
-		"returnByValue": true,
-	})
+	result, err := b.eval(ctx, "document.title")
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // Click clicks an element matching the selector.
@@ -455,24 +495,20 @@ func (b *Browser) DoubleClick(ctx context.Context, selector string) error {
 
 // Fill fills an input element with a value.
 func (b *Browser) Fill(ctx context.Context, selector string, value string) error {
-	client := b.getClient()
-	
 	// Focus the element
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				el.focus();
 				return true;
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	if err != nil {
 		return fmt.Errorf("fill focus: %w", err)
 	}
 
+	client := b.getClient()
 	// Select all existing text
 	_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type":     "keyDown",
@@ -497,24 +533,20 @@ func (b *Browser) Fill(ctx context.Context, selector string, value string) error
 
 // Type types text character by character.
 func (b *Browser) Type(ctx context.Context, selector string, text string, delay int) error {
-	client := b.getClient()
-	
 	// Focus the element
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				el.focus();
 				return true;
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	if err != nil {
 		return fmt.Errorf("type focus: %w", err)
 	}
 
+	client := b.getClient()
 	if delay == 0 {
 		delay = 50
 	}
@@ -529,8 +561,8 @@ func (b *Browser) Type(ctx context.Context, selector string, text string, delay 
 		}
 
 		_, err = client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
-			"type":  "keyUp",
-			"text":  string(ch),
+			"type": "keyUp",
+			"text": string(ch),
 		})
 		if err != nil {
 			return fmt.Errorf("type keyup: %w", err)
@@ -547,7 +579,7 @@ func (b *Browser) Type(ctx context.Context, selector string, text string, delay 
 // Press presses a keyboard key.
 func (b *Browser) Press(ctx context.Context, key string) error {
 	client := b.getClient()
-	
+
 	_, err := client.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
 		"type": "keyDown",
 		"key":  key,
@@ -594,60 +626,46 @@ func (b *Browser) Scroll(ctx context.Context, deltaX, deltaY float64) error {
 
 // Focus focuses an element.
 func (b *Browser) Focus(ctx context.Context, selector string) error {
-	client := b.getClient()
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				el.focus();
 				return true;
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	return err
 }
 
 // Check checks a checkbox element.
 func (b *Browser) Check(ctx context.Context, selector string) error {
-	client := b.getClient()
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				if (!el.checked) el.click();
 				return true;
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	return err
 }
 
 // Uncheck unchecks a checkbox element.
 func (b *Browser) Uncheck(ctx context.Context, selector string) error {
-	client := b.getClient()
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				if (el.checked) el.click();
 				return true;
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	return err
 }
 
 // Select selects an option in a <select> element.
 func (b *Browser) Select(ctx context.Context, selector string, value string) error {
-	client := b.getClient()
-	_, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	_, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
@@ -655,76 +673,36 @@ func (b *Browser) Select(ctx context.Context, selector string, value string) err
 				el.dispatchEvent(new Event('change', { bubbles: true }));
 				return true;
 			})()
-		`, selector, selector, value),
-		"returnByValue": true,
-	})
+		`, selector, selector, value))
 	return err
 }
 
 // Eval evaluates a JavaScript expression and returns the result.
 func (b *Browser) Eval(ctx context.Context, expression string) (any, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression":    expression,
-		"returnByValue": true,
-		"awaitPromise":  true,
-	})
+	result, err := b.eval(ctx, expression)
 	if err != nil {
 		return nil, fmt.Errorf("eval: %w", err)
 	}
-
-	var result struct {
-		Result struct {
-			Value any `json:"value"`
-			Type  string `json:"type"`
-		} `json:"result"`
-		ExceptionDetails *struct {
-			Text string `json:"text"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return nil, err
-	}
-
-	if result.ExceptionDetails != nil {
-		return nil, fmt.Errorf("eval exception: %s", result.ExceptionDetails.Text)
-	}
-
 	return result.Result.Value, nil
 }
 
 // GetText returns the text content of an element.
 func (b *Browser) GetText(ctx context.Context, selector string) (string, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				return el.innerText || el.textContent || '';
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // GetHTML returns the HTML content of an element or the whole page.
 func (b *Browser) GetHTML(ctx context.Context, selector string) (string, error) {
-	client := b.getClient()
 	expr := "document.documentElement.outerHTML"
 	if selector != "" {
 		expr = fmt.Sprintf(`
@@ -736,89 +714,46 @@ func (b *Browser) GetHTML(ctx context.Context, selector string) (string, error) 
 		`, selector, selector)
 	}
 
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression":    expr,
-		"returnByValue": true,
-	})
+	result, err := b.eval(ctx, expr)
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // GetValue returns the value of an input element.
 func (b *Browser) GetValue(ctx context.Context, selector string) (string, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				return el.value || '';
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // GetAttr returns an attribute value of an element.
 func (b *Browser) GetAttr(ctx context.Context, selector, attr string) (string, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				return el.getAttribute(%q) || '';
 			})()
-		`, selector, selector, attr),
-		"returnByValue": true,
-	})
+		`, selector, selector, attr))
 	if err != nil {
 		return "", err
 	}
-
-	var result struct {
-		Result struct {
-			Value string `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return "", err
-	}
-
-	return result.Result.Value, nil
+	return resultString(result), nil
 }
 
 // IsVisible checks if an element is visible.
 func (b *Browser) IsVisible(ctx context.Context, selector string) (bool, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) return false;
@@ -827,81 +762,41 @@ func (b *Browser) IsVisible(ctx context.Context, selector string) (bool, error) 
 				return rect.width > 0 && rect.height > 0 && 
 					   style.visibility !== 'hidden' && style.display !== 'none';
 			})()
-		`, selector),
-		"returnByValue": true,
-	})
+		`, selector))
 	if err != nil {
 		return false, err
 	}
-
-	var result struct {
-		Result struct {
-			Value bool `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return false, err
-	}
-
-	return result.Result.Value, nil
+	return resultBool(result), nil
 }
 
 // IsEnabled checks if an element is enabled.
 func (b *Browser) IsEnabled(ctx context.Context, selector string) (bool, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) return false;
 				return !el.disabled;
 			})()
-		`, selector),
-		"returnByValue": true,
-	})
+		`, selector))
 	if err != nil {
 		return false, err
 	}
-
-	var result struct {
-		Result struct {
-			Value bool `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return false, err
-	}
-
-	return result.Result.Value, nil
+	return resultBool(result), nil
 }
 
 // IsChecked checks if a checkbox is checked.
 func (b *Browser) IsChecked(ctx context.Context, selector string) (bool, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) return false;
 				return !!el.checked;
 			})()
-		`, selector),
-		"returnByValue": true,
-	})
+		`, selector))
 	if err != nil {
 		return false, err
 	}
-
-	var result struct {
-		Result struct {
-			Value bool `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return false, err
-	}
-
-	return result.Result.Value, nil
+	return resultBool(result), nil
 }
 
 // Screenshot captures a screenshot of the page.
@@ -922,13 +817,25 @@ func (b *Browser) Screenshot(ctx context.Context, opts *protocol.ScreenshotOptio
 			params["captureBeyondViewport"] = true
 		}
 		if opts.Selector != "" {
-			// Capture specific element
-			nodeID, err := b.resolveNodeID(ctx, opts.Selector)
+			x, y, width, height, err := b.resolveElementBox(ctx, opts.Selector)
 			if err != nil {
 				return nil, err
 			}
 			params["clip"] = map[string]any{
-				"nodeId": nodeID,
+				"x":      x,
+				"y":      y,
+				"width":  width,
+				"height": height,
+				"scale":  1,
+			}
+		}
+		if opts.ClipWidth > 0 && opts.ClipHeight > 0 {
+			params["clip"] = map[string]any{
+				"x":      opts.ClipX,
+				"y":      opts.ClipY,
+				"width":  opts.ClipWidth,
+				"height": opts.ClipHeight,
+				"scale":  1,
 			}
 		}
 	} else {
@@ -958,7 +865,7 @@ func (b *Browser) Screenshot(ctx context.Context, opts *protocol.ScreenshotOptio
 // Snapshot captures an accessibility tree snapshot of the page.
 func (b *Browser) Snapshot(ctx context.Context, opts *protocol.SnapshotOptions) (string, error) {
 	client := b.getClient()
-	
+
 	// Enable DOM and Accessibility
 	_, err := client.Send(ctx, "DOM.enable", nil)
 	if err != nil {
@@ -989,16 +896,16 @@ func (b *Browser) Snapshot(ctx context.Context, opts *protocol.SnapshotOptions) 
 
 // AXNode represents an accessibility tree node.
 type AXNode struct {
-	NodeID           string      `json:"nodeId"`
-	Ignored          bool        `json:"ignored"`
-	IgnoredReasons   []any       `json:"ignoredReasons"`
-	Role             *AXValue    `json:"role"`
-	Name             *AXValue    `json:"name"`
-	Description      *AXValue    `json:"description"`
-	Value            *AXValue    `json:"value"`
+	NodeID           string       `json:"nodeId"`
+	Ignored          bool         `json:"ignored"`
+	IgnoredReasons   []any        `json:"ignoredReasons"`
+	Role             *AXValue     `json:"role"`
+	Name             *AXValue     `json:"name"`
+	Description      *AXValue     `json:"description"`
+	Value            *AXValue     `json:"value"`
 	Properties       []AXProperty `json:"properties"`
-	ChildIDs         []string    `json:"childIds"`
-	BackendDOMNodeID int         `json:"backendDOMNodeId"`
+	ChildIDs         []string     `json:"childIds"`
+	BackendDOMNodeID int          `json:"backendDOMNodeId"`
 }
 
 type AXValue struct {
@@ -1128,41 +1035,55 @@ func formatAXTree(nodes []AXNode, opts *protocol.SnapshotOptions) string {
 
 // resolveElementCenter returns the center coordinates of an element.
 func (b *Browser) resolveElementCenter(ctx context.Context, selector string) (float64, float64, error) {
-	client := b.getClient()
-	msg, err := client.Send(ctx, "Runtime.evaluate", map[string]any{
-		"expression": fmt.Sprintf(`
+	x, y, width, height, err := b.resolveElementBox(ctx, selector)
+	if err != nil {
+		return 0, 0, err
+	}
+	return x + width/2, y + height/2, nil
+}
+
+// resolveElementBox returns the page-space bounding box of an element.
+func (b *Browser) resolveElementBox(ctx context.Context, selector string) (float64, float64, float64, float64, error) {
+	result, err := b.eval(ctx, fmt.Sprintf(`
 			(function() {
 				var el = document.querySelector(%q);
 				if (!el) throw new Error('Element not found: %s');
 				var rect = el.getBoundingClientRect();
-				return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+				return {
+					x: rect.x + window.scrollX,
+					y: rect.y + window.scrollY,
+					width: rect.width,
+					height: rect.height
+				};
 			})()
-		`, selector, selector),
-		"returnByValue": true,
-	})
+		`, selector, selector))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 
-	var result struct {
-		Result struct {
-			Value struct {
-				X float64 `json:"x"`
-				Y float64 `json:"y"`
-			} `json:"value"`
-		} `json:"result"`
+	var box struct {
+		X      float64 `json:"x"`
+		Y      float64 `json:"y"`
+		Width  float64 `json:"width"`
+		Height float64 `json:"height"`
 	}
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return 0, 0, err
+	data, err := json.Marshal(result.Result.Value)
+	if err != nil {
+		return 0, 0, 0, 0, err
 	}
-
-	return result.Result.Value.X, result.Result.Value.Y, nil
+	if err := json.Unmarshal(data, &box); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if box.Width <= 0 || box.Height <= 0 {
+		return 0, 0, 0, 0, fmt.Errorf("element has empty bounding box: %s", selector)
+	}
+	return box.X, box.Y, box.Width, box.Height, nil
 }
 
 // resolveNodeID returns the DOM node ID for a selector.
 func (b *Browser) resolveNodeID(ctx context.Context, selector string) (int, error) {
 	client := b.getClient()
-	
+
 	// First get the document
 	docMsg, err := client.Send(ctx, "DOM.getDocument", nil)
 	if err != nil {
@@ -1194,6 +1115,9 @@ func (b *Browser) resolveNodeID(ctx context.Context, selector string) (int, erro
 		return 0, err
 	}
 
+	if nodeResult.NodeID == 0 {
+		return 0, fmt.Errorf("element not found: %s", selector)
+	}
 	return nodeResult.NodeID, nil
 }
 
@@ -1454,5 +1378,6 @@ func (b *Browser) CloseTab(ctx context.Context, targetID string) error {
 
 // CDPClient returns the underlying CDP client for advanced usage.
 func (b *Browser) CDPClient() *cdp.Client {
-	return b.getClient()
+	client, _ := b.getClient().(*cdp.Client)
+	return client
 }

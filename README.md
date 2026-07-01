@@ -246,7 +246,7 @@ import (
     "log"
 
     "github.com/startvibecoding/vibe-browser/pkg/client"
-    "github.com/startvibecoding/vibe-browser/internal/chrome"
+    "github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
 func main() {
@@ -254,7 +254,7 @@ func main() {
 
     // Launch a new browser
     c, err := client.Open(ctx, &client.Options{
-        Browser: chrome.BrowserBrave,
+        Browser: protocol.BrowserBrave,
         Headless: true,
     })
     if err != nil {
