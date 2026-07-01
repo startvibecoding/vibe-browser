@@ -1,6 +1,6 @@
 {
   "name": "@startvibecoding/vibe-browser-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "vibe-browser native binary for darwin-arm64",
   "os": ["darwin"],
   "cpu": ["arm64"],

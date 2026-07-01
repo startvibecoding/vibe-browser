@@ -313,3 +313,34 @@ func TestLaunchSuccessMapsOptionsAndKillsTempProfile(t *testing.T) {
 	_, err = os.Stat(tempProfile)
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestLaunchUsesDefaultViewportSize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake browser is unix-only")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	exe := filepath.Join(dir, "fake-browser")
+	require.NoError(t, os.WriteFile(exe, []byte("#!/bin/sh\nprintf '%s\n' \"$@\" > "+argsPath+"\nexec sleep 30\n"), 0755))
+
+	restore := stubHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/json/version", r.URL.Path)
+		return jsonResponse(200, `{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/launched"}`), nil
+	})
+	defer restore()
+
+	proc, err := Launch(context.Background(), LaunchOptions{
+		ExecutablePath: exe,
+	}, slog.Default())
+	require.NoError(t, err)
+	require.NotNil(t, proc)
+	defer proc.Kill()
+
+	assert.Eventually(t, func() bool {
+		data, err := os.ReadFile(argsPath)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(data), "--window-size=1920,1080")
+	}, time.Second, 10*time.Millisecond)
+}

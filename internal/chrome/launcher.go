@@ -36,6 +36,12 @@ const DefaultCDPPort = 9222
 // AlternateCDPPort is the fallback port for CDP.
 const AlternateCDPPort = 9229
 
+// DefaultViewportWidth is the default browser window width.
+const DefaultViewportWidth = 1920
+
+// DefaultViewportHeight is the default browser window height.
+const DefaultViewportHeight = 1080
+
 // LaunchOptions configures how a browser is launched.
 type LaunchOptions struct {
 	// Browser type to launch (default: auto-detect)
@@ -509,8 +515,16 @@ func Launch(ctx context.Context, opts LaunchOptions, logger *slog.Logger) (*Proc
 		args = append(args, fmt.Sprintf("--proxy-server=%s", opts.Proxy))
 	}
 
-	if opts.ViewportWidth > 0 && opts.ViewportHeight > 0 {
-		args = append(args, fmt.Sprintf("--window-size=%d,%d", opts.ViewportWidth, opts.ViewportHeight))
+	viewportWidth := opts.ViewportWidth
+	if viewportWidth <= 0 {
+		viewportWidth = DefaultViewportWidth
+	}
+	viewportHeight := opts.ViewportHeight
+	if viewportHeight <= 0 {
+		viewportHeight = DefaultViewportHeight
+	}
+	if viewportWidth > 0 && viewportHeight > 0 {
+		args = append(args, fmt.Sprintf("--window-size=%d,%d", viewportWidth, viewportHeight))
 	}
 
 	if len(opts.Extensions) > 0 {
