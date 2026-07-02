@@ -1,6 +1,7 @@
 .PHONY: build build-compressed build-all install test lint fmt clean run help
 .PHONY: build-linux build-darwin build-windows
 .PHONY: npm-version npm-packages npm-pack npm-publish-all npm-publish-pre
+.PHONY: pypi-version pypi-packages pypi-pack pypi-publish pypi-publish-pre
 
 # Variables
 BINARY_NAME=vibe-browser
@@ -8,6 +9,18 @@ VERSION=$(shell git describe --tags --abbrev=0 2>/dev/null || echo "0.1.0")
 PRE_VERSION=$(if $(filter %-pre,$(VERSION)),$(VERSION),$(VERSION)-pre)
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 GOBUILD_FLAGS=-trimpath
+PYTHON ?= python3
+
+# Python venv for PyPI builds (isolated from system Python)
+PYPI_VENV := $(CURDIR)/pypi/.venv-build
+PYPI_PYTHON := $(PYPI_VENV)/bin/python
+
+# Create venv and install build deps (idempotent; only runs if venv is missing)
+$(PYPI_VENV)/bin/python:
+	@echo "Creating PyPI build venv..."
+	python3 -m venv $(PYPI_VENV)
+	$(PYPI_VENV)/bin/pip install -q --upgrade "setuptools>=77.0.0" build twine
+	@echo "PyPI build deps ready: $(PYPI_VENV)"
 
 # UPX compression
 USE_UPX ?= true
@@ -38,6 +51,13 @@ help:
 	@echo "  npm-pack          Pack all npm packages"
 	@echo "  npm-publish-all   Publish all npm packages"
 	@echo "  npm-publish-pre   Publish pre-release packages"
+	@echo ""
+	@echo "PyPI targets:"
+	@echo "  pypi-version      Sync version to PyPI package"
+	@echo "  pypi-packages     Build platform-specific PyPI wheels"
+	@echo "  pypi-pack         Pack all PyPI wheels"
+	@echo "  pypi-publish      Publish PyPI wheels"
+	@echo "  pypi-publish-pre  Publish pre-release PyPI wheels"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  install        Install via go install"
@@ -123,6 +143,7 @@ vet:
 # Clean
 clean:
 	rm -rf bin/
+	rm -rf pypi/dist pypi/build pypi/*.egg-info $(PYPI_VENV)
 
 # Run
 run: build
@@ -173,3 +194,29 @@ npm-publish-pre:
 	@echo "Publishing main package (pre-release)..."
 	cd npm && npm publish --tag next --access public
 	@echo "Published all packages (pre-release)!"
+
+# PyPI targets
+
+# Target-specific variable: use the isolated venv for all PyPI operations
+pypi-version: PYTHON := $(PYPI_PYTHON)
+pypi-packages: PYTHON := $(PYPI_PYTHON)
+pypi-pack: PYTHON := $(PYPI_PYTHON)
+pypi-publish: PYTHON := $(PYPI_PYTHON)
+pypi-publish-pre: PYTHON := $(PYPI_PYTHON)
+
+pypi-version: $(PYPI_VENV)/bin/python
+	PYTHON="$(PYTHON)" ./scripts/sync-pypi-version.sh $(VERSION)
+
+pypi-packages: build-all $(PYPI_VENV)/bin/python
+	PYTHON="$(PYTHON)" ./scripts/build-pypi-packages.sh
+
+pypi-pack: pypi-version pypi-packages
+	@echo "Done. Wheels in pypi/dist/"
+
+pypi-publish: pypi-pack $(PYPI_VENV)/bin/python
+	$(PYTHON) -m twine upload pypi/dist/*.whl
+
+pypi-publish-pre:
+	PYTHON="$(PYPI_PYTHON)" ./scripts/sync-pypi-version.sh $(PRE_VERSION)
+	$(MAKE) pypi-packages VERSION=$(PRE_VERSION) PYTHON=$(PYPI_PYTHON)
+	$(PYPI_PYTHON) -m twine upload pypi/dist/*.whl

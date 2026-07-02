@@ -1,6 +1,6 @@
 {
   "name": "@startvibecoding/vibe-browser",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Fast browser automation CLI and Go SDK for AI agents",
   "bin": {
     "vibe-browser": "bin/vibe-browser"
@@ -35,13 +35,13 @@
     "node": ">=14"
   },
   "optionalDependencies": {
-    "@startvibecoding/vibe-browser-linux-x64": "0.1.2",
-    "@startvibecoding/vibe-browser-linux-arm64": "0.1.2",
-    "@startvibecoding/vibe-browser-linux-musl-x64": "0.1.2",
-    "@startvibecoding/vibe-browser-linux-musl-arm64": "0.1.2",
-    "@startvibecoding/vibe-browser-darwin-x64": "0.1.2",
-    "@startvibecoding/vibe-browser-darwin-arm64": "0.1.2",
-    "@startvibecoding/vibe-browser-win32-x64": "0.1.2",
-    "@startvibecoding/vibe-browser-win32-arm64": "0.1.2"
+    "@startvibecoding/vibe-browser-linux-x64": "0.1.3",
+    "@startvibecoding/vibe-browser-linux-arm64": "0.1.3",
+    "@startvibecoding/vibe-browser-linux-musl-x64": "0.1.3",
+    "@startvibecoding/vibe-browser-linux-musl-arm64": "0.1.3",
+    "@startvibecoding/vibe-browser-darwin-x64": "0.1.3",
+    "@startvibecoding/vibe-browser-darwin-arm64": "0.1.3",
+    "@startvibecoding/vibe-browser-win32-x64": "0.1.3",
+    "@startvibecoding/vibe-browser-win32-arm64": "0.1.3"
   }
 }

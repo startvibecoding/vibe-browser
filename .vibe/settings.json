@@ -1,0 +1,28 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "ccstatusline",
+    "timeoutMs": 800,
+    "fallback": "builtin"
+  },
+  "webSearch": {},
+  "contextFiles": {
+    "enabled": false
+  },
+  "compaction": {
+    "enabled": false,
+    "reserveTokens": 0,
+    "keepRecentTokens": 0
+  },
+  "sandbox": {
+    "enabled": false,
+    "level": "",
+    "allowNetwork": false
+  },
+  "retry": {
+    "enabled": false,
+    "maxRetries": 0,
+    "baseDelayMs": 0
+  },
+  "approval": {}
+}
